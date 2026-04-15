@@ -893,15 +893,6 @@ def render_portfolio_tab(portfolio_data: dict):
                 except: dt_obj = datetime.now(timezone.utc)
             ago = time_ago(dt_obj)
 
-            prio_badge = '<span class="badge-priority">⚡ PRIORITY</span>' if is_prio else ""
-            stock_badge = f'<span class="badge-stock">{stock.upper()}</span>'
-            if sentiment == "positive" and not is_prio:
-                sent_badge = '<span class="badge-positive">▲ POSITIVE</span>'
-            elif sentiment == "negative" and not is_prio:
-                sent_badge = '<span class="badge-negative">▼ NEGATIVE</span>'
-            else:
-                sent_badge = ""
-
             st.markdown(f"""
             <div class="{card_class}">
               <a class="card-title" href="{art['link']}" target="_blank">{art['title']}</a>
