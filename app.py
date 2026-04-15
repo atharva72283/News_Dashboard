@@ -38,8 +38,6 @@ if PROXY_USER and PROXY_ADDR:
 # PORTFOLIO STOCKS
 # ─────────────────────────────────────────────
 PORTFOLIO_STOCKS = [
-    "Sammaan Capital",
-    "Suzlon",
     "Religare",
     "Valor Estate",
 ]
