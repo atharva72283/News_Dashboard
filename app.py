@@ -512,9 +512,9 @@ def render_portfolio_tab(portfolio_data: dict):
         <div class="stock-section-header"> {stock.upper()}</div>
         <div class="stock-sentiment-bar">
           <div class="stock-sent-item">Headlines: <span style="color:#e6edf3;">{len(articles)}</span></div>
-          <div class="stock-sent-item">🟢 Positive: <span class="pos">{pos}</span></div>
-          <div class="stock-sent-item">🔴 Negative: <span class="neg">{neg}</span></div>
-          <div class="stock-sent-item">⚪ Neutral: <span class="neu">{neu}</span></div>
+          <div class="stock-sent-item">Positive: <span class="pos">{pos}</span></div>
+          <div class="stock-sent-item">Negative: <span class="neg">{neg}</span></div>
+          <div class="stock-sent-item">Neutral: <span class="neu">{neu}</span></div>
         </div>
         """, unsafe_allow_html=True)
 
