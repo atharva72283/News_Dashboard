@@ -21,23 +21,14 @@ ADMIN_PASSWORD       = "JM_RISK_2026"
 AUTO_REFRESH_SECONDS = 90
 
 # Optional proxy — fill if needed inside JMF network
-PROXY_USER = ""
-PROXY_PASS = ""
-PROXY_ADDR = ""   # e.g. "10.60.52.39:8080"
-
 PROXIES = None
-if PROXY_USER and PROXY_ADDR:
-    eu = urllib.parse.quote(PROXY_USER)
-    ep = urllib.parse.quote(PROXY_PASS)
-    PROXIES = {
-        "http":  f"http://{eu}:{ep}@{PROXY_ADDR}",
-        "https": f"http://{eu}:{ep}@{PROXY_ADDR}",
-    }
 
 # ─────────────────────────────────────────────
 # PORTFOLIO STOCKS
 # ─────────────────────────────────────────────
 PORTFOLIO_STOCKS = [
+    "Sammaan Capital",
+    "Suzlon",
     "Religare",
     "Valor Estate",
 ]
@@ -107,13 +98,10 @@ Headlines:
         sentiment_dict = {}
         for i, title in enumerate(titles):
             key = str(i + 1)
-            # Flag if this was truly classified by AI (not neutral)
-            val = result_map.get(key, "neutral")
-            sentiment_dict[title] = val
+            sentiment_dict[title] = result_map.get(key, "neutral")
         return sentiment_dict
 
     except Exception as e:
-        st.warning(f"⚠️ Gemini AI unavailable: {e}")
         return {t: _fallback_sentiment(t) for t in titles}
 
 def _fallback_sentiment(title: str) -> str:
@@ -164,7 +152,7 @@ def parse_dt(entry) -> datetime:
 
 def fetch_feed(url: str) -> list:
     try:
-        resp = requests.get(url, timeout=10, verify=False, proxies=PROXIES)
+        resp = requests.get(url, timeout=10, verify=False)
         feed = feedparser.parse(resp.content)
         return [{"title": e.get("title", "").strip(), "link": e.get("link", "#"), "dt": parse_dt(e), "priority": is_priority(e.get("title", "")), "sentiment": "neutral"} for e in feed.entries[:15] if e.get("title")]
     except: return []
@@ -189,16 +177,6 @@ def fetch_circulars(feeds: list, exclude_kw: list) -> list:
     for i in items:
         if i["title"] not in seen: seen.add(i["title"]); unique.append(i)
     return unique
-
-def load_manual_headlines():
-    if os.path.exists(DB_FILE):
-        try: 
-            with open(DB_FILE) as f: return json.load(f)
-        except: return []
-    return []
-
-def save_manual_headlines(items):
-    with open(DB_FILE, "w") as f: json.dump(items, f, default=str)
 
 def time_ago(dt: datetime) -> str:
     diff = datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)
@@ -246,9 +224,67 @@ st.markdown(f"""
 # ─────────────────────────────────────────────
 with st.sidebar:
     auto_refresh = st.toggle("Auto Refresh (90s)", value=True)
-    if st.button("🔄 Refresh Now", use_container_width=True): st.cache_data.clear(); st.rerun()
+    if st.button("🔄 Refresh Now", use_container_width=True): 
+        st.cache_data.clear()
+        st.rerun()
 
 # ─────────────────────────────────────────────
 # DATA & RENDERING
 # ─────────────────────────────────────────────
-@st.cache_data(ttl=90, show_
+@st.cache_data(ttl=90, show_spinner=False)
+def load_all_data():
+    return fetch_all_feeds(FEED_SOURCES), fetch_circulars(RBI_CIRCULAR_FEEDS, EXCLUDE_CIRCULAR_KEYWORDS), fetch_circulars(NSE_CIRCULAR_FEEDS, EXCLUDE_CIRCULAR_KEYWORDS)
+
+all_data, rbi_circ, nse_circ = load_all_data()
+
+all_raw = []
+for cat, arts in all_data.items():
+    for a in arts: all_raw.append({**a, "category": cat})
+
+all_articles = batch_sentiment(all_raw)
+rbi_circ = batch_sentiment(rbi_circ)
+nse_circ = batch_sentiment(nse_circ)
+
+def render_news_cards(articles):
+    for art in articles:
+        sent = art.get("sentiment", "neutral")
+        prio = art.get("priority", False)
+        
+        cls = "news-card"
+        if prio: cls += " priority"
+        elif sent == "positive": cls += " sentiment-positive"
+        elif sent == "negative": cls += " sentiment-negative"
+        
+        sent_badge = ""
+        ai_proof = ""
+        if sent == "positive": 
+            sent_badge = '<span class="badge-positive">▲ POSITIVE</span>'
+            ai_proof = '<span class="badge-ai-classified">✦ GEMINI CLASSIFIED</span>'
+        elif sent == "negative": 
+            sent_badge = '<span class="badge-negative">▼ NEGATIVE</span>'
+            ai_proof = '<span class="badge-ai-classified">✦ GEMINI CLASSIFIED</span>'
+            
+        st.markdown(f"""
+        <div class="{cls}">
+          <a class="card-title" href="{art['link']}" target="_blank">{art['title']}</a>
+          <div class="card-meta">
+            <span>{time_ago(art['dt'])}</span>
+            <span>{art.get('category','')}</span>
+            {sent_badge}
+            {ai_proof}
+            {f'<span class="badge-priority">⚡ PRIORITY</span>' if prio else ""}
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# MAIN TABS
+# ─────────────────────────────────────────────
+t1, t2, t3 = st.tabs(["All News", "🏛️ RBI", "🔵 NSE"])
+with t1: render_news_cards(all_articles)
+with t2: render_news_cards(rbi_circ)
+with t3: render_news_cards(nse_circ)
+
+if auto_refresh:
+    time.sleep(AUTO_REFRESH_SECONDS)
+    st.cache_data.clear()
+    st.rerun()
