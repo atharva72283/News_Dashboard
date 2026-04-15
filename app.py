@@ -497,62 +497,66 @@ html, body, [class*="css"] {
     font-size: 0.62rem; font-weight: 600; letter-spacing: 0.06em;
 }
 
-def render_portfolio_tab(portfolio_data: dict):
-    if not portfolio_data:
-        st.markdown("<div style='color:#6e7681; font-size:0.8rem;'>No portfolio stocks configured.</div>", unsafe_allow_html=True)
-        return
+/* Portfolio stock section header */
+.stock-section-header {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.82rem; font-weight: 600;
+    color: #a78bfa; letter-spacing: 0.12em; text-transform: uppercase;
+    padding: 12px 0 6px;
+    border-bottom: 1px solid #2d2060;
+    margin-bottom: 10px;
+    margin-top: 14px;
+}
+.stock-sentiment-bar {
+    display: flex; gap: 14px; margin-bottom: 10px; flex-wrap: wrap;
+}
+.stock-sent-item {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.68rem; color: #6e7681;
+}
+.stock-sent-item .pos { color: #3fb950; font-weight: 600; }
+.stock-sent-item .neg { color: #f85149; font-weight: 600; }
+.stock-sent-item .neu { color: #8b949e; font-weight: 600; }
 
-    for stock, articles in portfolio_data.items():
-        pos = sum(1 for a in articles if a.get("sentiment") == "positive")
-        neg = sum(1 for a in articles if a.get("sentiment") == "negative")
-        neu = len(articles) - pos - neg
+.summary-bar {
+    display: flex; gap: 20px; flex-wrap: wrap;
+    background: #161b22; border: 1px solid #21262d;
+    border-radius: 6px; padding: 10px 18px; margin-bottom: 20px;
+}
+.sum-item { text-align: center; }
+.sum-val {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 1.4rem; font-weight: 600; color: #e6edf3;
+}
+.sum-val.red { color: #f85149; }
+.sum-val.green { color: #3fb950; }
+.sum-label { font-size: 0.68rem; color: #6e7681; text-transform: uppercase; letter-spacing: 0.1em; }
 
-        # Render Stock Header and Sentiment Bar
-        st.markdown(f"""
-        <div class="stock-section-header"> {stock.upper()}</div>
-        <div class="stock-sentiment-bar">
-          <div class="stock-sent-item">Headlines: <span style="color:#e6edf3;">{len(articles)}</span></div>
-          <div class="stock-sent-item">Positive: <span class="pos">{pos}</span></div>
-          <div class="stock-sent-item">Negative: <span class="neg">{neg}</span></div>
-          <div class="stock-sent-item">Neutral: <span class="neu">{neu}</span></div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        for art in articles:
-            sent = art.get("sentiment", "neutral")
-            prio = art.get("priority", False)
-            
-            # Determine Card CSS Class
-            cls = "news-card"
-            if prio: cls += " priority"
-            elif sent == "positive": cls += " sentiment-positive"
-            elif sent == "negative": cls += " sentiment-negative"
-            
-            # Badge Logic
-            sent_badge = ""
-            ai_proof = ""
-            if sent == "positive": 
-                sent_badge = '<span class="badge-positive">▲ POSITIVE</span>'
-                ai_proof = '<span class="badge-ai-classified">✦ GEMINI CLASSIFIED</span>'
-            elif sent == "negative": 
-                sent_badge = '<span class="badge-negative">▼ NEGATIVE</span>'
-                ai_proof = '<span class="badge-ai-classified">✦ GEMINI CLASSIFIED</span>'
-            
-            prio_badge = '<span class="badge-priority">⚡ PRIORITY</span>' if prio else ""
-            stock_badge = f'<span class="badge-stock" style="background:#2a1a4a; color:#a78bfa; font-size:0.6rem; padding:2px 6px; border-radius:3px;">{stock.upper()}</span>'
-
-            # THE FIX: Ensuring this markdown block uses unsafe_allow_html=True
-            st.markdown(f"""
-            <div class="{cls}">
-              <a class="card-title" href="{art['link']}" target="_blank">{art['title']}</a>
-              <div class="card-meta">
-                <span>{time_ago(art['dt'])}</span>
-                {stock_badge}
-                {sent_badge}
-                {ai_proof}
-                {prio_badge}
-              </div>
-            </div>""", unsafe_allow_html=True)
+section[data-testid="stSidebar"] {
+    background: #0d1117 !important;
+    border-right: 1px solid #21262d;
+}
+.stButton > button {
+    background: #21262d; color: #c9d1d9;
+    border: 1px solid #30363d; border-radius: 5px;
+    font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem;
+}
+.stButton > button:hover { background: #388bfd; color: #fff; border-color: #388bfd; }
+[data-testid="stTextInput"] input {
+    background: #161b22 !important; border: 1px solid #30363d !important;
+    color: #c9d1d9 !important; font-family: 'IBM Plex Mono', monospace; font-size: 0.82rem;
+}
+div[role="tablist"] button {
+    font-family: 'IBM Plex Mono', monospace !important;
+    font-size: 0.78rem !important; color: #8b949e !important;
+}
+div[role="tablist"] button[aria-selected="true"] {
+    color: #e6edf3 !important; border-bottom: 2px solid #388bfd !important;
+}
+.stMarkdown hr { border-color: #21262d; }
+.stSpinner > div { border-top-color: #388bfd !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
 # SIDEBAR — Stock lookup + Admin only (circular lookup removed)
@@ -717,6 +721,7 @@ ist = pytz.timezone('Asia/Kolkata')
 now_ist = datetime.now(ist)
 # Format the string
 now_str = now_ist.strftime("%d %b %Y · %H:%M:%S IST")
+
 st.markdown(f"""
 <div class="dash-header">
   <div>
