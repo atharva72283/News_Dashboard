@@ -20,6 +20,7 @@ import os
 import re
 import urllib.parse
 from collections import defaultdict
+import pytz
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -712,11 +713,14 @@ positive_count  = sum(1 for a in all_articles if a.get("sentiment") == "positive
 negative_count  = sum(1 for a in all_articles if a.get("sentiment") == "negative")
 
 # ─────────────────────────────────────────────
-# HEADER
+# HEADER (Updated for IST)
 # ─────────────────────────────────────────────
-
-now_str = datetime.now().strftime("%d %b %Y · %H:%M:%S IST")
-
+# Set the timezone to IST
+ist = pytz.timezone('Asia/Kolkata')
+# Get current time in IST
+now_ist = datetime.now(ist)
+# Format the string
+now_str = now_ist.strftime("%d %b %Y · %H:%M:%S IST")
 st.markdown(f"""
 <div class="dash-header">
   <div>
