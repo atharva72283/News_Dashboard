@@ -509,7 +509,7 @@ def render_portfolio_tab(portfolio_data: dict):
 
         # Render Stock Header and Sentiment Bar
         st.markdown(f"""
-        <div class="stock-section-header">📌 {stock.upper()}</div>
+        <div class="stock-section-header"> {stock.upper()}</div>
         <div class="stock-sentiment-bar">
           <div class="stock-sent-item">Headlines: <span style="color:#e6edf3;">{len(articles)}</span></div>
           <div class="stock-sent-item">🟢 Positive: <span class="pos">{pos}</span></div>
