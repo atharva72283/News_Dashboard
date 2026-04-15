@@ -2,10 +2,9 @@
 JM Financial | Risk Intelligence Dashboard
 ==========================================
 Real-time news aggregator for risk officers.
-AI-powered sentiment analysis via Gemini API.
 
-Run with:  streamlit run app.py
-Install:   pip install streamlit requests beautifulsoup4 lxml feedparser anthropic
+Run with:  streamlit run risk_dashboard.py
+Install:   pip install streamlit requests beautifulsoup4 lxml feedparser
 """
 
 import streamlit as st
@@ -21,13 +20,12 @@ import os
 import re
 import urllib.parse
 from collections import defaultdict
-import google.generativeai as genai
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-DB_FILE              = "manual_headlines.json"
-ADMIN_PASSWORD       = "JM_RISK_2026"
+DB_FILE             = "manual_headlines.json"
+ADMIN_PASSWORD      = "JM_RISK_2026"
 AUTO_REFRESH_SECONDS = 90
 
 # Optional proxy — fill if needed inside JMF network
@@ -53,6 +51,7 @@ PORTFOLIO_STOCKS = [
     "Religare",
     "Valor Estate",
     # Add more stocks here — up to 10 recommended
+    # "Stock Name",
 ]
 
 # ─────────────────────────────────────────────
@@ -70,6 +69,50 @@ PRIORITY_KEYWORDS = [
     "fraud", "scam", "ban", "action against",
 ]
 
+# ─────────────────────────────────────────────
+# SENTIMENT KEYWORDS
+# ─────────────────────────────────────────────
+NEGATIVE_KEYWORDS = [
+    "crash", "plunge", "fall", "drop", "decline", "loss", "losses", "slump",
+    "selloff", "sell-off", "tumble", "sink", "sinks", "sank", "collapse",
+    "collapses", "crisis", "recession", "default", "fraud", "scam", "ban",
+    "penalty", "suspension", "warning", "risk", "threat", "attack", "war",
+    "conflict", "sanctions", "halt", "circuit breaker", "devaluation",
+    "inflation spike", "rate hike", "downgrade", "cut", "cuts", "probe",
+    "investigation", "sebi action", "npa", "writeoff", "write-off",
+    "layoff", "layoffs", "fired", "bankrupt", "insolvency", "debt",
+    "miss", "misses", "disappoints", "disappointing", "weak", "slowdown",
+    "contraction", "negative", "bearish", "bear market", "correction",
+    "volatility", "uncertainty", "concern", "worried", "fear", "panic",
+    "outflow", "outflows", "exodus", "dumped", "dumping",
+]
+
+POSITIVE_KEYWORDS = [
+    "rally", "surge", "gain", "gains", "rise", "rises", "rose", "jump",
+    "jumps", "jumped", "soar", "soars", "soared", "high", "record",
+    "all-time high", "ath", "profit", "profits", "revenue", "growth",
+    "upgrade", "buy", "bullish", "bull", "outperform", "beat", "beats",
+    "strong", "robust", "positive", "boost", "boosts", "boosted",
+    "inflow", "inflows", "investment", "order", "orders", "win", "wins",
+    "contract", "expansion", "rate cut", "rate cuts", "easing",
+    "recovery", "recovers", "rebound", "rebounds", "optimism",
+    "opportunity", "partnership", "deal", "acquisition", "merger",
+    "dividend", "buyback", "approval", "approved", "launches", "launch",
+    "breakthrough", "innovation", "milestone", "commissioning",
+    "capacity addition", "capex", "turnaround", "outperform",
+]
+
+def get_sentiment(title: str) -> str:
+    """Returns 'positive', 'negative', or 'neutral' based on title keywords."""
+    t = title.lower()
+    neg_score = sum(1 for kw in NEGATIVE_KEYWORDS if kw in t)
+    pos_score = sum(1 for kw in POSITIVE_KEYWORDS if kw in t)
+    if neg_score > pos_score:
+        return "negative"
+    elif pos_score > neg_score:
+        return "positive"
+    return "neutral"
+
 # Keywords that indicate filings / court orders — filter these OUT from RBI/NSE tabs
 EXCLUDE_CIRCULAR_KEYWORDS = [
     "court", "tribunal", "writ", "petition", "judgment", "judgement",
@@ -77,119 +120,7 @@ EXCLUDE_CIRCULAR_KEYWORDS = [
     "annual report", "quarterly result", "q1 result", "q2 result",
     "q3 result", "q4 result", "earnings", "balance sheet",
     "ipo filing", "drhp", "prospectus",
-]
-
-# ─────────────────────────────────────────────
-# ─────────────────────────────────────────────
-# AI SENTIMENT via Google Gemini API
-# ─────────────────────────────────────────────
-import google.generativeai as genai
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_sentiment_ai(titles_tuple: tuple) -> dict:
-    """
-    Uses Gemini AI (Gemini 1.5 Flash) to analyze sentiment for a batch of news headlines.
-    Returns a dict: { headline -> 'positive' | 'negative' | 'neutral' }
-    """
-    titles = list(titles_tuple)
-    if not titles:
-        return {}
-
-    # RECOMMENDED: Set 'GOOGLE_API_KEY' in your Streamlit Secrets
-    # For now, using the key you provided directly:
-    api_key = st.secrets.get("GOOGLE_API_KEY", "AIzaSyAx5KZN02kysRoZv9AyRkWOR3ukocuvziE")
-    
-    if not api_key:
-        return {t: _fallback_sentiment(t) for t in titles}
-
-    try:
-        genai.configure(api_key=api_key)
-        # Using 1.5-flash for speed and cost-efficiency in sentiment tasks
-        model = genai.GenerativeModel("gemini-1.5-flash")
-
-        # Build numbered list for batch analysis
-        numbered = "\n".join([f"{i+1}. {t}" for i, t in enumerate(titles)])
-
-        prompt = f"""You are a financial news sentiment analyst for an Indian equity risk management team.
-
-Analyze the sentiment of each headline below from the perspective of a RISK OFFICER at an Indian financial firm.
-
-Rules:
-- "positive" = good for markets, investors, or the subject company (e.g. FII buying, strong earnings, rate cuts, policy support)
-- "negative" = bad for markets, investors, or the subject company (e.g. FII selling, fraud, default, crash, penalty)
-- "neutral" = factual/informational with no clear market impact
-
-IMPORTANT context rules:
-- "FII buying" or "DII buying" = POSITIVE
-- "FII selling" or "outflows" = NEGATIVE
-- "rate cut" = POSITIVE for equities
-- "rate hike" = NEGATIVE for equities
-- Consider Indian market context — RBI, SEBI, NSE, BSE, NIFTY, SENSEX
-
-Respond ONLY with a valid JSON object. No explanation. No markdown. Format:
-{{"1": "positive", "2": "negative", "3": "neutral", ...}}
-
-Headlines:
-{numbered}"""
-
-        response = model.generate_content(prompt)
-        
-        # Extract and clean text response
-        raw = response.text.strip()
-        raw = re.sub(r"```json|```", "", raw).strip()
-        result_map = json.loads(raw)
-
-        # Map numbered results back to original headlines
-        sentiment_dict = {}
-        for i, title in enumerate(titles):
-            key = str(i + 1)
-            sentiment_dict[title] = result_map.get(key, "neutral")
-        return sentiment_dict
-
-    except Exception as e:
-        st.warning(f"⚠️ Gemini AI sentiment temporarily unavailable: {e}. Using basic analysis.", icon="⚠️")
-        return {t: _fallback_sentiment(t) for t in titles}
-
-
-def _fallback_sentiment(title: str) -> str:
-    """
-    Minimal fallback used ONLY if Gemini API is unavailable.
-    """
-    t = title.lower()
-    obvious_negative = ["fraud", "scam", "default", "bankrupt", "crash", "plunge", "ban", "penalty", "suspend"]
-    obvious_positive = ["record high", "all-time high", "profit surge", "strong growth", "rate cut"]
-    if any(kw in t for kw in obvious_negative):
-        return "negative"
-    if any(kw in t for kw in obvious_positive):
-        return "positive"
-    return "neutral"
-
-
-def batch_sentiment(articles: list) -> list:
-    """
-    Enriches a list of article dicts with AI sentiment.
-    Batches headlines in groups of 50 for efficiency.
-    """
-    if not articles:
-        return articles
-
-    BATCH_SIZE = 50
-    all_titles = [a["title"] for a in articles]
-
-    sentiment_map = {}
-    for i in range(0, len(all_titles), BATCH_SIZE):
-        batch = all_titles[i:i + BATCH_SIZE]
-        batch_result = get_sentiment_ai(tuple(batch)) 
-        sentiment_map.update(batch_result)
-
-    for article in articles:
-        article["sentiment"] = sentiment_map.get(article["title"], "neutral")
-
-    return articles
-
-def is_priority(title: str) -> bool:
-    t = title.lower()
-    return any(kw in t for kw in PRIORITY_KEYWORDS)
+]	
 
 # ─────────────────────────────────────────────
 # RSS SOURCES — Main news tabs
@@ -252,420 +183,592 @@ NSE_CIRCULAR_FEEDS = [
 ]
 
 # ─────────────────────────────────────────────
-# FEED FETCHING
+# HELPERS
 # ─────────────────────────────────────────────
 
-def parse_dt(entry) -> datetime:
-    for attr in ("published_parsed", "updated_parsed"):
-        t = getattr(entry, attr, None)
-        if t:
+def is_priority(title: str) -> bool:
+    t = title.lower()
+    return any(kw in t for kw in PRIORITY_KEYWORDS)
+
+def is_excluded_circular(title: str) -> bool:
+    t = title.lower()
+    return any(kw in t for kw in EXCLUDE_CIRCULAR_KEYWORDS)
+
+def parse_date(entry) -> datetime:
+    for field in ("published_parsed", "updated_parsed"):
+        val = getattr(entry, field, None)
+        if val:
             try:
-                return datetime(*t[:6], tzinfo=timezone.utc)
+                return datetime(*val[:6], tzinfo=timezone.utc)
             except Exception:
                 pass
     return datetime.now(timezone.utc)
 
+def clean_title(title: str) -> str:
+    title = re.sub(r'\s*[-–|]\s*[A-Z][^-–|]{2,40}$', '', title)
+    return title.strip()
 
-def fetch_feed(url: str) -> list:
+def fetch_feed(url: str, timeout: int = 6) -> list:
+    articles = []
     try:
-        kwargs = dict(timeout=10, verify=False)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "application/rss+xml, application/xml, text/xml, */*",
+        }
+        kwargs = dict(headers=headers, timeout=timeout, verify=False)
         if PROXIES:
             kwargs["proxies"] = PROXIES
         resp = requests.get(url, **kwargs)
+        resp.raise_for_status()
         feed = feedparser.parse(resp.content)
-        items = []
         for entry in feed.entries[:15]:
-            title = entry.get("title", "").strip()
-            link  = entry.get("link", "#")
+            title = clean_title(getattr(entry, "title", "") or "")
+            link  = getattr(entry, "link", "") or ""
             if not title:
                 continue
-            items.append({
-                "title":    title,
-                "link":     link,
-                "dt":       parse_dt(entry),
-                "priority": is_priority(title),
-                "sentiment": "neutral",  # will be filled by AI
+            dt = parse_date(entry)
+            articles.append({
+                "title":     title,
+                "link":      link,
+                "dt":        dt,
+                "priority":  is_priority(title),
+                "sentiment": get_sentiment(title),
             })
-        return items
     except Exception:
-        return []
+        pass
+    return articles
 
-
-def fetch_all_feeds(feed_dict: dict) -> dict:
-    results = defaultdict(list)
-    all_urls = [(cat, url) for cat, urls in feed_dict.items() for url in urls]
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        futures = {ex.submit(fetch_feed, url): (cat, url) for cat, url in all_urls}
-        for future in as_completed(futures):
-            cat, _ = futures[future]
-            results[cat].extend(future.result())
-    # Sort each category by datetime descending
-    for cat in results:
-        results[cat].sort(key=lambda x: x["dt"], reverse=True)
-    return dict(results)
-
-
-def fetch_circulars(feeds: list, exclude_kw: list) -> list:
-    items = []
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        futures = [ex.submit(fetch_feed, url) for url in feeds]
-        for future in as_completed(futures):
-            for item in future.result():
-                t = item["title"].lower()
-                if not any(kw in t for kw in exclude_kw):
-                    items.append(item)
-    items.sort(key=lambda x: x["dt"], reverse=True)
-    # Deduplicate by title
+def fetch_urls_parallel(urls: list, filter_fn=None) -> list:
+    articles = []
     seen = set()
-    unique = []
-    for item in items:
-        if item["title"] not in seen:
-            seen.add(item["title"])
-            unique.append(item)
-    return unique
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = {ex.submit(fetch_feed, url): url for url in urls}
+        for future in as_completed(futures, timeout=12):
+            try:
+                for art in future.result():
+                    key = art["title"][:60].lower()
+                    if key not in seen:
+                        if filter_fn is None or filter_fn(art):
+                            seen.add(key)
+                            articles.append(art)
+            except Exception:
+                pass
+    articles.sort(key=lambda x: x["dt"], reverse=True)
+    return articles
 
+@st.cache_data(ttl=AUTO_REFRESH_SECONDS)
+def fetch_all_feeds() -> dict:
+    tasks = []
+    for category, urls in FEED_SOURCES.items():
+        for url in urls:
+            tasks.append((category, url))
 
-def load_manual_headlines() -> list:
+    cat_articles = defaultdict(list)
+    cat_seen     = defaultdict(set)
+
+    with ThreadPoolExecutor(max_workers=14) as ex:
+        future_map = {ex.submit(fetch_feed, url): (cat, url) for cat, url in tasks}
+        for future in as_completed(future_map, timeout=15):
+            cat, _ = future_map[future]
+            try:
+                for art in future.result():
+                    key = art["title"][:60].lower()
+                    if key not in cat_seen[cat]:
+                        cat_seen[cat].add(key)
+                        cat_articles[cat].append(art)
+            except Exception:
+                pass
+
+    result = {}
+    for cat in FEED_SOURCES:
+        arts = cat_articles.get(cat, [])
+        arts.sort(key=lambda x: x["dt"], reverse=True)
+        result[cat] = arts[:20]
+    return result
+
+@st.cache_data(ttl=180)
+def fetch_rbi_circulars() -> list:
+    arts = fetch_urls_parallel(
+        RBI_CIRCULAR_FEEDS,
+        filter_fn=lambda a: not is_excluded_circular(a["title"])
+    )
+    return arts[:25]
+
+@st.cache_data(ttl=180)
+def fetch_nse_circulars() -> list:
+    arts = fetch_urls_parallel(
+        NSE_CIRCULAR_FEEDS,
+        filter_fn=lambda a: not is_excluded_circular(a["title"])
+    )
+    return arts[:25]
+
+@st.cache_data(ttl=AUTO_REFRESH_SECONDS)
+def fetch_portfolio_news() -> dict:
+    """Fetch latest news for each stock in PORTFOLIO_STOCKS."""
+    result = {}
+    for stock in PORTFOLIO_STOCKS:
+        feeds = [
+            gn(f"{stock} stock NSE BSE India"),
+            gn(f"{stock} share price news India"),
+            gn(f"{stock} India company results earnings"),
+        ]
+        arts = fetch_urls_parallel(feeds)
+        result[stock] = arts[:15]
+    return result
+
+def load_manual() -> list:
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE) as f:
                 return json.load(f)
         except Exception:
-            return []
+            pass
     return []
 
-
-def save_manual_headlines(items: list):
+def save_manual(data: list):
     with open(DB_FILE, "w") as f:
-        json.dump(items, f, default=str)
+        json.dump(data[:20], f)
 
-
-def time_ago(dt: datetime) -> str:
-    if not isinstance(dt, datetime):
-        return "unknown"
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    diff = datetime.now(timezone.utc) - dt
-    s = int(diff.total_seconds())
-    if s < 60:   return f"{s}s ago"
-    if s < 3600: return f"{s//60}m ago"
-    if s < 86400:return f"{s//3600}h ago"
-    return f"{s//86400}d ago"
+def time_ago(dt) -> str:
+    if isinstance(dt, str):
+        try: dt = datetime.fromisoformat(dt)
+        except: return ""
+    delta = datetime.now(timezone.utc) - dt
+    secs  = int(delta.total_seconds())
+    if secs < 60:    return f"{secs}s ago"
+    if secs < 3600:  return f"{secs//60}m ago"
+    if secs < 86400: return f"{secs//3600}h ago"
+    return dt.strftime("%d %b")
 
 # ─────────────────────────────────────────────
-# PAGE CONFIG
+# PAGE CONFIG & CSS
 # ─────────────────────────────────────────────
 
 st.set_page_config(
     page_title="JM Financial | Risk Intelligence",
-    page_icon="📊",
+    page_icon="🛡️",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
-
-# ─────────────────────────────────────────────
-# CSS
-# ─────────────────────────────────────────────
 
 st.markdown("""
 <style>
-/* Base */
-html, body, [class*="css"] {
-    font-family: 'IBM Plex Mono', 'Courier New', monospace !important;
-    background-color: #0d1117 !important;
-    color: #c9d1d9 !important;
-}
-.block-container { padding-top: 1rem !important; max-width: 1400px !important; }
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 
-/* Header */
-.dashboard-header {
-    background: linear-gradient(135deg, #161b22 0%, #0d1117 100%);
-    border: 1px solid #21262d;
-    border-radius: 8px;
-    padding: 16px 24px;
-    margin-bottom: 16px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+html, body, [class*="css"] {
+    font-family: 'IBM Plex Sans', sans-serif;
+    background: #0a0c10 !important;
+    color: #c9d1d9;
 }
-.dashboard-title {
-    font-size: 1.1rem;
-    font-weight: 700;
-    color: #e6edf3;
-    letter-spacing: 0.05em;
+.stApp { background: #0a0c10; }
+
+.dash-header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 18px 0 12px;
+    border-bottom: 1px solid #21262d;
+    margin-bottom: 20px;
 }
-.dashboard-subtitle {
-    font-size: 0.7rem;
-    color: #484f58;
-    margin-top: 2px;
+.dash-title {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 1.3rem; font-weight: 600;
+    color: #e6edf3; letter-spacing: 0.08em;
+}
+.dash-sub {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.72rem; color: #8b949e;
+    letter-spacing: 0.12em; text-transform: uppercase;
+}
+.live-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #161b22; border: 1px solid #30363d;
+    border-radius: 4px; padding: 4px 10px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.68rem; color: #3fb950;
 }
 .live-dot {
-    width: 8px; height: 8px;
-    background: #3fb950;
-    border-radius: 50%;
-    display: inline-block;
-    margin-right: 6px;
-    animation: pulse 2s infinite;
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #3fb950; animation: pulse 1.5s infinite;
 }
-@keyframes pulse {
-    0%,100% { opacity:1; } 50% { opacity:0.3; }
-}
-.ai-badge {
-    background: linear-gradient(135deg, #6e40c9, #388bfd);
-    color: white;
-    font-size: 0.62rem;
-    font-weight: 700;
-    padding: 3px 8px;
-    border-radius: 20px;
-    letter-spacing: 0.05em;
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+.cat-header {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.78rem; font-weight: 600;
+    color: #8b949e; letter-spacing: 0.15em; text-transform: uppercase;
+    padding: 8px 0 6px; border-bottom: 1px solid #21262d; margin-bottom: 10px;
 }
 
-/* News Cards */
+/* ── BASE NEWS CARD ── */
 .news-card {
-    background: #161b22;
-    border: 1px solid #21262d;
-    border-left: 3px solid #21262d;
-    border-radius: 6px;
-    padding: 10px 14px;
-    margin-bottom: 6px;
-    transition: border-color 0.2s;
+    background: #161b22; border: 1px solid #21262d;
+    border-left: 3px solid #21262d; border-radius: 6px;
+    padding: 10px 14px; margin-bottom: 8px;
+    transition: border-color 0.2s, background 0.2s;
 }
-.news-card:hover { border-left-color: #388bfd; }
-.news-card.priority { border-left-color: #f85149 !important; background: #1a0f0f; }
-.news-card.sentiment-positive { border-left-color: #3fb950; background: #0d1a0f; }
-.news-card.sentiment-negative { border-left-color: #f85149; background: #1a0d0d; }
-.news-card.rbi { border-left-color: #d29922; }
-.news-card.nse { border-left-color: #388bfd; }
+.news-card:hover { border-color: #388bfd; background: #1c2128; }
+
+/* ── SENTIMENT: POSITIVE — green tint ── */
+.news-card.sentiment-positive {
+    border-left: 3px solid #2ea043;
+    background: #0d1f15;
+}
+.news-card.sentiment-positive:hover {
+    border-left-color: #3fb950;
+    background: #112218;
+}
+
+/* ── SENTIMENT: NEGATIVE — red tint ── */
+.news-card.sentiment-negative {
+    border-left: 3px solid #8b1a1a;
+    background: #160d0d;
+}
+.news-card.sentiment-negative:hover {
+    border-left-color: #f85149;
+    background: #1a1010;
+}
+
+/* ── PRIORITY overrides sentiment (always red + bright) ── */
+.news-card.priority {
+    border-left: 3px solid #f85149 !important;
+    background: #1a1318 !important;
+}
+.news-card.priority:hover {
+    border-left-color: #ff6b6b !important;
+    background: #1e1520 !important;
+}
+
+/* ── MANUAL ALERT ── */
+.news-card.manual { border-left: 3px solid #d29922; background: #16130a; }
+
+/* ── CIRCULAR CARDS ── */
+.news-card.rbi { border-left: 3px solid #d29922; }
+.news-card.rbi:hover { border-left-color: #f0b429; background: #1c1810; }
+.news-card.nse { border-left: 3px solid #388bfd; }
+.news-card.nse:hover { border-left-color: #58a6ff; background: #101825; }
 
 .card-title {
-    font-size: 0.82rem;
-    font-weight: 500;
-    color: #c9d1d9 !important;
-    text-decoration: none !important;
-    line-height: 1.4;
-    display: block;
-    margin-bottom: 6px;
+    font-size: 0.88rem; font-weight: 500;
+    color: #e6edf3; line-height: 1.4; text-decoration: none;
 }
-.card-title:hover { color: #388bfd !important; }
+.card-title:hover { color: #58a6ff; }
 .card-meta {
-    font-size: 0.68rem;
-    color: #484f58;
-    display: flex;
-    gap: 8px;
-    align-items: center;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.68rem; color: #6e7681;
+    margin-top: 5px; display: flex; gap: 12px; align-items: center;
     flex-wrap: wrap;
 }
-
-/* Badges */
-.badge-priority { background:#f85149; color:#fff; font-size:0.6rem; font-weight:700; padding:2px 6px; border-radius:3px; }
-.badge-positive { background:#1a4a1f; color:#3fb950; font-size:0.6rem; font-weight:700; padding:2px 6px; border-radius:3px; border:1px solid #3fb950; }
-.badge-negative { background:#4a1a1a; color:#f85149; font-size:0.6rem; font-weight:700; padding:2px 6px; border-radius:3px; border:1px solid #f85149; }
-.badge-manual   { background:#1a2a4a; color:#388bfd; font-size:0.6rem; font-weight:700; padding:2px 6px; border-radius:3px; }
-.badge-rbi      { background:#2a1f00; color:#d29922; font-size:0.6rem; font-weight:700; padding:2px 6px; border-radius:3px; border:1px solid #d29922; }
-.badge-nse      { background:#001a3a; color:#388bfd; font-size:0.6rem; font-weight:700; padding:2px 6px; border-radius:3px; border:1px solid #388bfd; }
-.badge-stock    { background:#2a1a4a; color:#a78bfa; font-size:0.6rem; font-weight:700; padding:2px 6px; border-radius:3px; }
-.badge-ai       { background:linear-gradient(135deg,#1a0f3a,#0f1a3a); color:#a78bfa; font-size:0.58rem; font-weight:700; padding:2px 6px; border-radius:3px; border:1px solid #6e40c9; }
-
-/* Category header */
-.cat-header {
-    font-size: 0.75rem;
-    font-weight: 700;
-    color: #388bfd;
-    letter-spacing: 0.08em;
-    padding: 6px 0 10px;
-    border-bottom: 1px solid #21262d;
-    margin-bottom: 12px;
+.badge-priority {
+    background: #3d1a1a; color: #f85149;
+    border-radius: 3px; padding: 1px 7px;
+    font-size: 0.62rem; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase;
 }
-.stock-section-header {
-    font-size: 0.78rem;
-    font-weight: 700;
-    color: #a78bfa;
+.badge-positive {
+    background: #0d2e14; color: #3fb950;
+    border-radius: 3px; padding: 1px 7px;
+    font-size: 0.62rem; font-weight: 600;
     letter-spacing: 0.06em;
-    padding: 8px 0 4px;
-    border-bottom: 1px solid #21262d;
-    margin: 12px 0 8px;
+}
+.badge-negative {
+    background: #2d1010; color: #f85149;
+    border-radius: 3px; padding: 1px 7px;
+    font-size: 0.62rem; font-weight: 600;
+    letter-spacing: 0.06em;
+}
+.badge-manual {
+    background: #2d2200; color: #d29922;
+    border-radius: 3px; padding: 1px 7px;
+    font-size: 0.62rem; font-weight: 600;
+}
+.badge-rbi {
+    background: #2d2200; color: #d29922;
+    border-radius: 3px; padding: 1px 7px;
+    font-size: 0.62rem; font-weight: 600; letter-spacing: 0.06em;
+}
+.badge-nse {
+    background: #0d1f3c; color: #58a6ff;
+    border-radius: 3px; padding: 1px 7px;
+    font-size: 0.62rem; font-weight: 600; letter-spacing: 0.06em;
+}
+.badge-stock {
+    background: #1a1040; color: #a78bfa;
+    border-radius: 3px; padding: 1px 7px;
+    font-size: 0.62rem; font-weight: 600; letter-spacing: 0.06em;
+}
+
+/* Portfolio stock section header */
+.stock-section-header {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.82rem; font-weight: 600;
+    color: #a78bfa; letter-spacing: 0.12em; text-transform: uppercase;
+    padding: 12px 0 6px;
+    border-bottom: 1px solid #2d2060;
+    margin-bottom: 10px;
+    margin-top: 14px;
 }
 .stock-sentiment-bar {
-    display: flex;
-    gap: 16px;
-    font-size: 0.68rem;
-    color: #484f58;
-    margin-bottom: 10px;
-    flex-wrap: wrap;
+    display: flex; gap: 14px; margin-bottom: 10px; flex-wrap: wrap;
+}
+.stock-sent-item {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.68rem; color: #6e7681;
 }
 .stock-sent-item .pos { color: #3fb950; font-weight: 600; }
 .stock-sent-item .neg { color: #f85149; font-weight: 600; }
-.stock-sent-item .neu { color: #484f58; font-weight: 600; }
+.stock-sent-item .neu { color: #8b949e; font-weight: 600; }
 
-/* AI loading indicator */
-.ai-loading {
-    font-size: 0.72rem;
-    color: #a78bfa;
-    padding: 8px 0;
-    font-style: italic;
+.summary-bar {
+    display: flex; gap: 20px; flex-wrap: wrap;
+    background: #161b22; border: 1px solid #21262d;
+    border-radius: 6px; padding: 10px 18px; margin-bottom: 20px;
 }
+.sum-item { text-align: center; }
+.sum-val {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 1.4rem; font-weight: 600; color: #e6edf3;
+}
+.sum-val.red { color: #f85149; }
+.sum-val.green { color: #3fb950; }
+.sum-label { font-size: 0.68rem; color: #6e7681; text-transform: uppercase; letter-spacing: 0.1em; }
+
+section[data-testid="stSidebar"] {
+    background: #0d1117 !important;
+    border-right: 1px solid #21262d;
+}
+.stButton > button {
+    background: #21262d; color: #c9d1d9;
+    border: 1px solid #30363d; border-radius: 5px;
+    font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem;
+}
+.stButton > button:hover { background: #388bfd; color: #fff; border-color: #388bfd; }
+[data-testid="stTextInput"] input {
+    background: #161b22 !important; border: 1px solid #30363d !important;
+    color: #c9d1d9 !important; font-family: 'IBM Plex Mono', monospace; font-size: 0.82rem;
+}
+div[role="tablist"] button {
+    font-family: 'IBM Plex Mono', monospace !important;
+    font-size: 0.78rem !important; color: #8b949e !important;
+}
+div[role="tablist"] button[aria-selected="true"] {
+    color: #e6edf3 !important; border-bottom: 2px solid #388bfd !important;
+}
+.stMarkdown hr { border-color: #21262d; }
+.stSpinner > div { border-top-color: #388bfd !important; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# HEADER
-# ─────────────────────────────────────────────
-
-now_str = datetime.now(timezone.utc).strftime("%d %b %Y · %H:%M UTC")
-api_configured = bool(st.secrets.get("ANTHROPIC_API_KEY", ""))
-
-st.markdown(f"""
-<div class="dashboard-header">
-  <div>
-    <div class="dashboard-title">
-      <span class="live-dot"></span>JM FINANCIAL · RISK INTELLIGENCE DASHBOARD
-    </div>
-    <div class="dashboard-subtitle">Real-time news · AI-powered sentiment · {now_str}</div>
-  </div>
-  <div style="display:flex;gap:8px;align-items:center;">
-    <span class="ai-badge">{'✦ AI SENTIMENT ON' if api_configured else '⚠ AI SENTIMENT OFF'}</span>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────
-# SIDEBAR — Admin + Controls
+# SIDEBAR — Stock lookup + Admin only (circular lookup removed)
 # ─────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("### ⚙️ Controls")
-    auto_refresh = st.toggle("Auto Refresh (90s)", value=True)
+    st.markdown("""
+    <div style='font-family:IBM Plex Mono,monospace;font-size:0.9rem;
+    color:#e6edf3;font-weight:600;padding:8px 0 16px;
+    border-bottom:1px solid #21262d;margin-bottom:16px;'>
+    🛡️ RISK DESK
+    </div>""", unsafe_allow_html=True)
+
+    auto_refresh = st.toggle("⟳ Auto-refresh (90s)", value=True)
+
     if st.button("🔄 Refresh Now", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
     st.markdown("---")
-    st.markdown("### 🔐 Admin Panel")
-    pwd = st.text_input("Password", type="password")
-    is_admin = (pwd == ADMIN_PASSWORD)
 
-    if is_admin:
-        st.success("Access granted")
-        st.markdown("**Add Internal Headline**")
-        new_title = st.text_input("Headline")
-        new_link  = st.text_input("Link (optional)", value="#")
-        new_cat   = st.selectbox("Category", ["Internal", "Risk Alert", "Compliance"] + list(FEED_SOURCES.keys()))
-        if st.button("➕ Add Headline", use_container_width=True):
-            if new_title:
-                manual = load_manual_headlines()
-                manual.append({
-                    "title": new_title, "link": new_link,
-                    "dt": datetime.now(timezone.utc).isoformat(),
-                    "category": new_cat, "manual": True,
-                    "priority": is_priority(new_title),
-                    "sentiment": "neutral",
-                })
-                save_manual_headlines(manual)
-                st.cache_data.clear()
-                st.success("Added!")
-                st.rerun()
+    # ── Stock News Lookup ──
+    st.markdown("""<div style='font-family:IBM Plex Mono,monospace;
+    font-size:0.72rem;color:#3fb950;text-transform:uppercase;
+    letter-spacing:0.1em;margin-bottom:8px;'>📈 Stock News Lookup</div>""",
+    unsafe_allow_html=True)
 
-        manual_items = load_manual_headlines()
-        if manual_items:
-            st.markdown("**Manage Headlines**")
-            for i, item in enumerate(manual_items):
-                col1, col2 = st.columns([4, 1])
-                col1.markdown(f"<div style='font-size:0.7rem;color:#c9d1d9'>{item['title'][:50]}...</div>", unsafe_allow_html=True)
-                if col2.button("🗑", key=f"del_{i}"):
-                    manual_items.pop(i)
-                    save_manual_headlines(manual_items)
-                    st.rerun()
+    stock_query = st.text_input(
+        "Stock", label_visibility="collapsed",
+        placeholder="e.g. Reliance, HDFC Bank, INFY",
+        key="stock_input"
+    )
+
+    if stock_query:
+        sc = stock_query.strip()
+        stock_feeds = [
+            gn(sc + " stock NSE BSE India"),
+            gn(sc + " share price earnings results"),
+            gn(sc + " India company news"),
+        ]
+        with st.spinner(f"Fetching {sc}…"):
+            stock_arts = fetch_urls_parallel(stock_feeds)
+
+        if stock_arts:
+            st.markdown(f"""<div style='font-family:IBM Plex Mono,monospace;
+            font-size:0.68rem;color:#8b949e;margin-bottom:8px;'>
+            {len(stock_arts)} results · <span style='color:#e6edf3;'>
+            {sc.upper()}</span></div>""", unsafe_allow_html=True)
+
+            for art in stock_arts[:12]:
+                is_p      = art.get("priority", False)
+                sentiment = art.get("sentiment", "neutral")
+                if is_p:
+                    border, bg = "#f85149", "#1a1318"
+                elif sentiment == "positive":
+                    border, bg = "#2ea043", "#0d1f15"
+                elif sentiment == "negative":
+                    border, bg = "#8b1a1a", "#160d0d"
+                else:
+                    border, bg = "#388bfd", "#161b22"
+                ago  = time_ago(art["dt"])
+                prio = '<span style="color:#f85149;font-size:0.6rem;font-weight:700;">⚡ </span>' if is_p else ""
+                sent_icon = "🟢 " if sentiment == "positive" else ("🔴 " if sentiment == "negative" else "")
+                st.markdown(f"""
+                <div style="background:{bg};border:1px solid #21262d;
+                border-left:3px solid {border};border-radius:5px;
+                padding:8px 12px;margin-bottom:6px;">
+                  <a href="{art['link']}" target="_blank"
+                     style="font-size:0.82rem;color:#e6edf3;
+                     text-decoration:none;line-height:1.4;display:block;">
+                     {prio}{sent_icon}{art['title']}
+                  </a>
+                  <div style="font-family:IBM Plex Mono,monospace;
+                  font-size:0.65rem;color:#6e7681;margin-top:4px;">{ago}</div>
+                </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown("""<div style='font-family:IBM Plex Mono,monospace;
+            font-size:0.75rem;color:#6e7681;padding:8px 0;'>
+            No results. Try the full company name.</div>""", unsafe_allow_html=True)
 
     st.markdown("---")
-    if not api_configured:
-        st.markdown("""
-        <div style='font-size:0.7rem;color:#d29922;background:#1a1400;border:1px solid #d29922;
-        border-radius:6px;padding:10px;'>
-        ⚠️ <b>AI Sentiment Disabled</b><br><br>
-        To enable Claude AI sentiment, add your Anthropic API key to Streamlit secrets:<br><br>
-        <code>ANTHROPIC_API_KEY = "sk-ant-..."</code><br><br>
-        Go to: Streamlit Cloud → Your App → Settings → Secrets
-        </div>
-        """, unsafe_allow_html=True)
+
+    # ── Admin: push internal alert ──
+    st.markdown("""<div style='font-family:IBM Plex Mono,monospace;
+    font-size:0.72rem;color:#8b949e;text-transform:uppercase;
+    letter-spacing:0.1em;margin-bottom:8px;'>Internal Alert</div>""",
+    unsafe_allow_html=True)
+
+    pwd = st.text_input("Password", type="password",
+                        label_visibility="collapsed",
+                        placeholder="Admin password")
+    if pwd == ADMIN_PASSWORD:
+        headline_text = st.text_input("Headline", placeholder="e.g. NIFTY circuit breaker triggered")
+        headline_link = st.text_input("Link (optional)", placeholder="https://...")
+        if st.button("🚨 Push Alert", use_container_width=True):
+            if headline_text:
+                current = load_manual()
+                current.insert(0, {
+                    "title":     headline_text,
+                    "link":      headline_link or "#",
+                    "dt":        datetime.now(timezone.utc).isoformat(),
+                    "priority":  True,
+                    "sentiment": "negative",
+                    "manual":    True,
+                })
+                save_manual(current)
+                st.success("Alert pushed!")
+                time.sleep(0.5)
+                st.rerun()
+
+    st.markdown("---")
+    st.markdown("""<div style='font-family:IBM Plex Mono,monospace;
+    font-size:0.65rem;color:#484f58;'>
+    Data: Google News · Reuters · RBI · NSE<br>
+    News refresh: 90s · Circulars: 3min
+    </div>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# DATA FETCHING
+# FETCH ALL DATA
 # ─────────────────────────────────────────────
 
-@st.cache_data(ttl=90, show_spinner=False)
-def load_all_data():
-    all_data       = fetch_all_feeds(FEED_SOURCES)
-    rbi_circulars  = fetch_circulars(RBI_CIRCULAR_FEEDS, EXCLUDE_CIRCULAR_KEYWORDS)
-    nse_circulars  = fetch_circulars(NSE_CIRCULAR_FEEDS, EXCLUDE_CIRCULAR_KEYWORDS)
+with st.spinner("Fetching live feeds…"):
+    all_data        = fetch_all_feeds()
+    rbi_circulars   = fetch_rbi_circulars()
+    nse_circulars   = fetch_nse_circulars()
+    portfolio_data  = fetch_portfolio_news()
 
-    # Portfolio stocks
-    portfolio_data = {}
-    port_feeds = {stock: [gn(f"{stock} stock NSE BSE India")] for stock in PORTFOLIO_STOCKS}
-    raw_port   = fetch_all_feeds(port_feeds)
-    for stock in PORTFOLIO_STOCKS:
-        portfolio_data[stock] = raw_port.get(stock, [])
+manual_items = load_manual()
 
-    return all_data, rbi_circulars, nse_circulars, portfolio_data
-
-
-with st.spinner("📡 Fetching latest news..."):
-    all_data, rbi_circulars, nse_circulars, portfolio_data = load_all_data()
-
-# Combine all articles
-manual_headlines = load_manual_headlines()
-for item in manual_headlines:
-    if "dt" in item and isinstance(item["dt"], str):
-        try: item["dt"] = datetime.fromisoformat(item["dt"])
-        except: item["dt"] = datetime.now(timezone.utc)
-
-all_articles_raw = []
+# Build combined "all news" list
+all_articles = []
 for cat, arts in all_data.items():
-    for a in arts:
-        all_articles_raw.append({**a, "category": cat, "manual": False})
-for item in manual_headlines:
-    all_articles_raw.append({**item, "manual": True})
+    for art in arts:
+        all_articles.append({**art, "category": cat, "manual": False})
 
-all_articles_raw.sort(key=lambda x: x["dt"] if isinstance(x["dt"], datetime) else datetime.now(timezone.utc), reverse=True)
+# Prepend manual alerts
+for m in manual_items:
+    all_articles.insert(0, {
+        "title":     m["title"],
+        "link":      m["link"],
+        "dt":        m["dt"],
+        "priority":  True,
+        "sentiment": "negative",
+        "category":  "🚨 Internal Alert",
+        "manual":    True,
+    })
 
-# ─────────────────────────────────────────────
-# AI SENTIMENT — run on all articles at once
-# ─────────────────────────────────────────────
+all_articles.sort(key=lambda x: (
+    datetime.fromisoformat(x["dt"]) if isinstance(x["dt"], str) else x["dt"]
+), reverse=True)
 
-with st.spinner("🤖 Analyzing sentiment with Claude AI..."):
-    all_articles = batch_sentiment(all_articles_raw)
-    # Also run on portfolio and circulars
-    for stock in portfolio_data:
-        portfolio_data[stock] = batch_sentiment(portfolio_data[stock])
-    rbi_circulars = batch_sentiment(rbi_circulars)
-    nse_circulars = batch_sentiment(nse_circulars)
-
-# ─────────────────────────────────────────────
-# STATS BAR
-# ─────────────────────────────────────────────
-
-total   = len(all_articles)
-prio_n  = sum(1 for a in all_articles if a.get("priority"))
-pos_n   = sum(1 for a in all_articles if a.get("sentiment") == "positive")
-neg_n   = sum(1 for a in all_articles if a.get("sentiment") == "negative")
-
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("📰 Total Headlines", total)
-c2.metric("⚡ Priority", prio_n)
-c3.metric("🟢 Positive", pos_n)
-c4.metric("🔴 Negative", neg_n)
-c5.metric("⚪ Neutral", total - pos_n - neg_n)
-
-st.markdown("---")
+priority_count  = sum(1 for a in all_articles if a.get("priority"))
+positive_count  = sum(1 for a in all_articles if a.get("sentiment") == "positive")
+negative_count  = sum(1 for a in all_articles if a.get("sentiment") == "negative")
 
 # ─────────────────────────────────────────────
-# CARD RENDERERS
+# HEADER
+# ─────────────────────────────────────────────
+
+now_str = datetime.now().strftime("%d %b %Y · %H:%M:%S IST")
+
+st.markdown(f"""
+<div class="dash-header">
+  <div>
+    <div class="dash-title">JM FINANCIAL · RISK INTELLIGENCE</div>
+    <div class="dash-sub">{now_str}</div>
+  </div>
+  <div style="margin-left:auto">
+    <div class="live-badge"><div class="live-dot"></div>LIVE</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# SUMMARY BAR — now includes sentiment counts
+# ─────────────────────────────────────────────
+
+col1, col2, col3, col4, col5, col6 = st.columns(6)
+with col1:
+    c = "red" if priority_count > 0 else "green"
+    st.markdown(f"""<div class="summary-bar" style="justify-content:center">
+    <div class="sum-item"><div class="sum-val {c}">{priority_count}</div>
+    <div class="sum-label">Priority Alerts</div></div></div>""", unsafe_allow_html=True)
+with col2:
+    st.markdown(f"""<div class="summary-bar" style="justify-content:center">
+    <div class="sum-item"><div class="sum-val">{len(all_articles)}</div>
+    <div class="sum-label">Total Headlines</div></div></div>""", unsafe_allow_html=True)
+with col3:
+    st.markdown(f"""<div class="summary-bar" style="justify-content:center">
+    <div class="sum-item"><div class="sum-val green">{positive_count}</div>
+    <div class="sum-label">🟢 Positive</div></div></div>""", unsafe_allow_html=True)
+with col4:
+    st.markdown(f"""<div class="summary-bar" style="justify-content:center">
+    <div class="sum-item"><div class="sum-val red">{negative_count}</div>
+    <div class="sum-label">🔴 Negative</div></div></div>""", unsafe_allow_html=True)
+with col5:
+    st.markdown(f"""<div class="summary-bar" style="justify-content:center">
+    <div class="sum-item"><div class="sum-val">{len(rbi_circulars)}</div>
+    <div class="sum-label">RBI Circulars</div></div></div>""", unsafe_allow_html=True)
+with col6:
+    st.markdown(f"""<div class="summary-bar" style="justify-content:center">
+    <div class="sum-item"><div class="sum-val">{len(nse_circulars)}</div>
+    <div class="sum-label">NSE Circulars</div></div></div>""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# RENDER HELPERS
 # ─────────────────────────────────────────────
 
 def render_news_cards(articles: list):
     if not articles:
         st.markdown("""<div style='font-family:IBM Plex Mono,monospace;
         font-size:0.8rem;color:#484f58;padding:20px 0;'>
-        No news found — try Refresh Now.</div>""", unsafe_allow_html=True)
+        No articles found.</div>""", unsafe_allow_html=True)
         return
     for art in articles:
         is_prio   = art.get("priority", False)
@@ -673,7 +776,10 @@ def render_news_cards(articles: list):
         sentiment = art.get("sentiment", "neutral")
         cat_label = art.get("category", "")
 
-        if is_prio:
+        # Determine card CSS class — priority always wins
+        if is_manual:
+            card_class = "news-card manual"
+        elif is_prio:
             card_class = "news-card priority"
         elif sentiment == "positive":
             card_class = "news-card sentiment-positive"
@@ -690,8 +796,6 @@ def render_news_cards(articles: list):
 
         prio_badge   = '<span class="badge-priority">⚡ PRIORITY</span>' if is_prio else ""
         manual_badge = '<span class="badge-manual">📢 INTERNAL</span>' if is_manual else ""
-        ai_badge     = '<span class="badge-ai">✦ AI</span>'
-
         if not is_prio and not is_manual:
             if sentiment == "positive":
                 sent_badge = '<span class="badge-positive">▲ POSITIVE</span>'
@@ -709,10 +813,9 @@ def render_news_cards(articles: list):
             <span>{ago}</span>
             <span style="color:#30363d">·</span>
             <span>{cat_label}</span>
-            {prio_badge}{manual_badge}{sent_badge}{ai_badge}
+            {prio_badge}{manual_badge}{sent_badge}
           </div>
         </div>""", unsafe_allow_html=True)
-
 
 def render_circular_cards(articles: list, badge_class: str, card_extra_class: str):
     if not articles:
@@ -727,28 +830,18 @@ def render_circular_cards(articles: list, badge_class: str, card_extra_class: st
         ago      = time_ago(art["dt"])
         prio_badge  = '<span class="badge-priority">⚡ PRIORITY</span>' if is_prio else ""
         type_badge  = f'<span class="{badge_class}">{"RBI" if "rbi" in card_extra_class else "NSE"} CIRCULAR</span>'
-        ai_badge    = '<span class="badge-ai">✦ AI</span>'
-        sentiment   = art.get("sentiment", "neutral")
-        if sentiment == "positive":
-            sent_badge = '<span class="badge-positive">▲ POSITIVE</span>'
-        elif sentiment == "negative":
-            sent_badge = '<span class="badge-negative">▼ NEGATIVE</span>'
-        else:
-            sent_badge = ""
         st.markdown(f"""
         <div class="{card_cls}">
           <a class="card-title" href="{art['link']}" target="_blank">{art['title']}</a>
           <div class="card-meta">
             <span>{ago}</span>
             {type_badge}
-            {sent_badge}
             {prio_badge}
-            {ai_badge}
           </div>
         </div>""", unsafe_allow_html=True)
 
-
 def render_portfolio_tab(portfolio_data: dict):
+    """Render news for each portfolio stock, grouped by stock name."""
     if not portfolio_data:
         st.markdown("""<div style='font-family:IBM Plex Mono,monospace;
         font-size:0.8rem;color:#484f58;padding:20px 0;'>
@@ -795,9 +888,8 @@ def render_portfolio_tab(portfolio_data: dict):
                 except: dt_obj = datetime.now(timezone.utc)
             ago = time_ago(dt_obj)
 
-            prio_badge  = '<span class="badge-priority">⚡ PRIORITY</span>' if is_prio else ""
+            prio_badge = '<span class="badge-priority">⚡ PRIORITY</span>' if is_prio else ""
             stock_badge = f'<span class="badge-stock">{stock.upper()}</span>'
-            ai_badge    = '<span class="badge-ai">✦ AI</span>'
             if sentiment == "positive" and not is_prio:
                 sent_badge = '<span class="badge-positive">▲ POSITIVE</span>'
             elif sentiment == "negative" and not is_prio:
@@ -813,7 +905,6 @@ def render_portfolio_tab(portfolio_data: dict):
                 {stock_badge}
                 {sent_badge}
                 {prio_badge}
-                {ai_badge}
               </div>
             </div>""", unsafe_allow_html=True)
 
@@ -876,7 +967,6 @@ for tab, cat in zip(cat_tabs, news_cats):
     with tab:
         st.markdown(f'<div class="cat-header">{cat}</div>', unsafe_allow_html=True)
         arts = [{**a, "category": cat, "manual": False} for a in all_data.get(cat, [])]
-        arts = batch_sentiment(arts)
         render_news_cards(arts)
 
 # ─────────────────────────────────────────────
