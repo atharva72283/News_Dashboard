@@ -799,7 +799,7 @@ def render_news_cards(articles: list):
             except: dt_obj = datetime.now(timezone.utc)
         ago = time_ago(dt_obj)
 
-        prio_badge = '<span class="badge-priority">\u26a1 PRIORITY</span>' if is_prio else ""
+        prio_badge   = '<span class="badge-priority">⚡ PRIORITY</span>' if is_prio else ""
         manual_badge = '<span class="badge-manual">📢 INTERNAL</span>' if is_manual else ""
         if not is_prio and not is_manual:
             if sentiment == "positive":
@@ -892,6 +892,15 @@ def render_portfolio_tab(portfolio_data: dict):
                 try: dt_obj = datetime.fromisoformat(dt_obj)
                 except: dt_obj = datetime.now(timezone.utc)
             ago = time_ago(dt_obj)
+
+            prio_badge = '<span class="badge-priority">⚡ PRIORITY</span>' if is_prio else ""
+            stock_badge = f'<span class="badge-stock">{stock.upper()}</span>'
+            if sentiment == "positive" and not is_prio:
+                sent_badge = '<span class="badge-positive">▲ POSITIVE</span>'
+            elif sentiment == "negative" and not is_prio:
+                sent_badge = '<span class="badge-negative">▼ NEGATIVE</span>'
+            else:
+                sent_badge = ""
 
             st.markdown(f"""
             <div class="{card_class}">
