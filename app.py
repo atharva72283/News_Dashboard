@@ -338,11 +338,6 @@ RBI_RSS_FEEDS = [
     "https://rbi.org.in/notifications_rss.xml",
     "https://rbi.org.in/pressreleases_rss.xml",
 ]
-RBI_ASPX_URLS = [
-    "https://www.rbi.org.in/Scripts/BS_CircularIndexDisplay.aspx",
-    "https://www.rbi.org.in/Scripts/NotificationUser.aspx",
-]
-
 
 def fetch_rbi_circulars() -> list:
     all_items = []
