@@ -1,8 +1,0 @@
-streamlit
-urllib3
-requests
-beautifulsoup4
-lxml
-feedparser
-google-generativeai
-pytz
