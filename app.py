@@ -343,34 +343,6 @@ RBI_ASPX_URLS = [
     "https://www.rbi.org.in/Scripts/NotificationUser.aspx",
 ]
 
-def fetch_rbi_aspx(url: str) -> list:
-    try:
-        from bs4 import BeautifulSoup
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        resp = requests.get(url, headers=headers, timeout=15, verify=False,
-                            proxies=PROXIES or {})
-        soup = BeautifulSoup(resp.content, "lxml")
-        items = []
-        for a in soup.find_all("a", href=True):
-            href  = a["href"].strip()
-            title = a.get_text(strip=True)
-            if not title or len(title) < 20:
-                continue
-            if any(kw in href.lower() for kw in ["notification", "circular", "rdocs", "masters"]):
-                if not href.startswith("http"):
-                    href = "https://www.rbi.org.in" + href
-                dt_now = datetime.now(timezone.utc)
-                items.append({
-                    "title": title, "link": href, "dt": dt_now,
-                    "priority": is_priority(title),
-                    "sentiment": get_sentiment(title),
-                    "source": "RBI Direct",
-                })
-            if len(items) >= 15:
-                break
-        return items
-    except Exception:
-        return []
 
 def fetch_rbi_circulars() -> list:
     all_items = []
@@ -399,14 +371,6 @@ def fetch_rbi_circulars() -> list:
                 })
         except Exception:
             pass
-
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        futs = [ex.submit(fetch_rbi_aspx, u) for u in RBI_ASPX_URLS]
-        for fut in as_completed(futs):
-            for item in fut.result():
-                if item["title"] not in seen and is_current_fy(item["dt"]):
-                    seen.add(item["title"])
-                    all_items.append(item)
 
     all_items.sort(key=lambda x: x["dt"], reverse=True)
     return all_items[:50]
