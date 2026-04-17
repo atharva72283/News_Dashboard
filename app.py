@@ -527,10 +527,13 @@ section[data-testid="stSidebar"] .stButton > button:hover {
 }
 
 /* ── TOP HEADER BAR ── */
+
+
 .top-bar {
     background: #1a237e;
     border-radius: 8px;
     padding: 10px 20px;
+    margin-top: 80px;
     margin-bottom: 10px;
     display: flex;
     justify-content: space-between;
