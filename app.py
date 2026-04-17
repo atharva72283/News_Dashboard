@@ -533,7 +533,7 @@ section[data-testid="stSidebar"] .stButton > button:hover {
     background: #1a237e;
     border-radius: 8px;
     padding: 10px 20px;
-    margin-top: 80px;
+    margin-top: 50px;
     margin-bottom: 10px;
     display: flex;
     justify-content: space-between;
@@ -553,7 +553,7 @@ section[data-testid="stSidebar"] .stButton > button:hover {
 .live-dot {
     width: 8px; height: 8px;
     background: #4caf50;
-    border-radius: 50%;
+    border-radius: 65%;
     display: inline-block;
     margin-right: 6px;
     animation: pulse 2s infinite;
