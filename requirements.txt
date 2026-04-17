@@ -6,3 +6,5 @@ beautifulsoup4
 lxml
 yfinance
 pytz
+pandas
+openpyxl
