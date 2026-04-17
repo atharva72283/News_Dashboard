@@ -558,6 +558,7 @@ section[data-testid="stSidebar"] .card-meta  { color: #555555 !important; }
     background: #1a237e;
     border-radius: 8px;
     padding: 10px 20px;
+    margin-top: 50px;
     margin-bottom: 10px;
     display: flex;
     justify-content: space-between;
