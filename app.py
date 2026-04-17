@@ -506,18 +506,18 @@ section[data-testid="stSidebar"] {
     border-right: 1px solid #2d3748;
 }
 section[data-testid="stSidebar"] * {
-    color: #e2e8f0 !important;
+    color: #0d47a1 !important;
 }
 section[data-testid="stSidebar"] input,
 section[data-testid="stSidebar"] textarea {
     background: #2d3748 !important;
     border: 1px solid #4a5568 !important;
-    color: #e2e8f0 !important;
+    color: #0d47a1 !important;
     border-radius: 6px !important;
 }
 section[data-testid="stSidebar"] .stButton > button {
     background: #2d3748 !important;
-    color: #e2e8f0 !important;
+    color: #0d47a1 !important;
     border: 1px solid #4a5568 !important;
     border-radius: 6px !important;
     font-size: 11pt !important;
