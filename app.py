@@ -321,11 +321,6 @@ FEED_SOURCES = {
         gn("US economy recession GDP"),
         gn("IMF World Bank global economy"),
     ],
-    "📈 Moneycontrol": [
-        "https://www.moneycontrol.com/rss/latestnews.xml",
-        "https://www.moneycontrol.com/rss/marketreports.xml",
-        "https://www.moneycontrol.com/rss/business.xml",
-    ],
     "📰 Economic Times": [
         "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
         "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms",
@@ -958,7 +953,7 @@ with st.sidebar:
                 "⚠️ Risk Alert", "📋 Compliance", "🏛️ Internal Memo",
                 "🇮🇳 India Markets", "💵 Currency & Forex",
                 "🛢️ Commodities & Oil", "🌍 Geopolitical Risk",
-                "📊 Global Macro", "📈 Moneycontrol",
+                "📊 Global Macro",
                 "📰 Economic Times", "🗞️ Mint Markets",
             ],
             key="adm_cat"
