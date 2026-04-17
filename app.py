@@ -1031,7 +1031,7 @@ if current_portfolio:
             os.remove(PORTFOLIO_FILE)
         st.rerun()
 
-st.markdown("---")
+    st.markdown("---")
 
     # ── 3. CONTROLS ───────────────────────────
     st.markdown("### ⚙️ Controls")
