@@ -989,51 +989,49 @@ with st.sidebar:
     st.markdown("---")
 
     # ── 2. PORTFOLIO IMPORT ───────────────────
-    st.markdown("### 📂 Portfolio Import")
-    st.markdown("""
-    <div class="import-info">
-      Upload Excel with Sheet 1 having columns:<br>
-      <b>ISIN · NSE CODE · BSE CODE · NAME OF COMPANY · POSITION IN CRS</b>
-    </div>""", unsafe_allow_html=True)
+st.markdown("### 📂 Portfolio Import")
 
-    uploaded_excel = st.file_uploader(
-        label="Upload Portfolio Excel",
-        type=["xlsx", "xls"],
-        key="portfolio_upload",
-        label_visibility="collapsed",
-        help="Excel file with ISIN, NSE CODE, BSE CODE, NAME OF COMPANY, POSITION IN CRS"
+# Removed the 'import-info' div block to clean up the UI
+
+uploaded_excel = st.file_uploader(
+    # Moved instructions here so they are visible but compact
+    label="Upload Excel (ISIN, NSE CODE, BSE CODE, NAME, POSITION IN CRS)", 
+    type=["xlsx", "xls"],
+    key="portfolio_upload",
+    label_visibility="visible", # Changed to visible so the user knows what to upload
+    help="Excel file must have Sheet 1 with the specific portfolio columns."
+)
+
+if uploaded_excel is not None:
+    with st.spinner("Parsing Excel..."):
+        new_portfolio, err_msg = parse_excel_portfolio(uploaded_excel)
+    if new_portfolio:
+        st.session_state["portfolio"] = new_portfolio
+        save_portfolio(new_portfolio)
+        st.success(f"✅ Imported {len(new_portfolio)} stocks!")
+        st.cache_data.clear()
+    else:
+        st.error(f"❌ Import failed: {err_msg}")
+
+# Show current portfolio summary
+current_portfolio = st.session_state.get("portfolio", load_portfolio())
+if current_portfolio:
+    total_pos = sum(p.get("position_crs", 0) for p in current_portfolio)
+    st.markdown(
+        f"<div style='font-size:9.5pt;color:#90caf9;margin-top:4px;'>"
+        f"📌 {len(current_portfolio)} stocks loaded"
+        + (f" &nbsp;·&nbsp; ₹{total_pos:,.1f} Cr total" if total_pos > 0 else "")
+        + "</div>",
+        unsafe_allow_html=True
     )
 
-    if uploaded_excel is not None:
-        with st.spinner("Parsing Excel..."):
-            new_portfolio, err_msg = parse_excel_portfolio(uploaded_excel)
-        if new_portfolio:
-            st.session_state["portfolio"] = new_portfolio
-            save_portfolio(new_portfolio)
-            st.success(f"✅ Imported {len(new_portfolio)} stocks!")
-            st.cache_data.clear()
-        else:
-            st.error(f"❌ Import failed: {err_msg}")
+    if st.button("🗑 Clear Portfolio / Use Defaults", use_container_width=True, key="clear_portfolio"):
+        st.session_state["portfolio"] = DEFAULT_PORTFOLIO
+        if os.path.exists(PORTFOLIO_FILE):
+            os.remove(PORTFOLIO_FILE)
+        st.rerun()
 
-    # Show current portfolio summary
-    current_portfolio = st.session_state.get("portfolio", load_portfolio())
-    if current_portfolio:
-        total_pos = sum(p.get("position_crs", 0) for p in current_portfolio)
-        st.markdown(
-            f"<div style='font-size:9.5pt;color:#90caf9;margin-top:4px;'>"
-            f"📌 {len(current_portfolio)} stocks loaded"
-            + (f" &nbsp;·&nbsp; ₹{total_pos:,.1f} Cr total" if total_pos > 0 else "")
-            + "</div>",
-            unsafe_allow_html=True
-        )
-
-        if st.button("🗑 Clear Portfolio / Use Defaults", use_container_width=True, key="clear_portfolio"):
-            st.session_state["portfolio"] = DEFAULT_PORTFOLIO
-            if os.path.exists(PORTFOLIO_FILE):
-                os.remove(PORTFOLIO_FILE)
-            st.rerun()
-
-    st.markdown("---")
+st.markdown("---")
 
     # ── 3. CONTROLS ───────────────────────────
     st.markdown("### ⚙️ Controls")
