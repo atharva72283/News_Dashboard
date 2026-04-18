@@ -41,10 +41,11 @@ AUTO_REFRESH_SECONDS = 90
 PROXIES              = None
 
 DEFAULT_PORTFOLIO = [
-    {"name": "Sammaan Capital", "nse_code": "SAMMAANCAP", "position_crs": 0},
-    {"name": "Suzlon",          "nse_code": "SUZLON",      "position_crs": 0},
-    {"name": "Religare",        "nse_code": "RELIGARE",    "position_crs": 0},
-    {"name": "Valor Estate",    "nse_code": "VALOR",       "position_crs": 0},
+    {"name": "Lodha Developers", "nse_code": "LODHA", "position_crs": 0},
+    {"name": "Karnataka Bank",          "nse_code": "KTKBANK",      "position_crs": 0},
+    {"name": "Sammaan Capital",        "nse_code": "SAMMAANCAP",    "position_crs": 0},
+    {"name": "Lloyds Metal and Energy",    "nse_code": "LLOYDSME",       "position_crs": 0},
+   {"name": "Jio Financial Services",    "nse_code": "JIOFIN",       "position_crs": 0},
 ]
 
 MARKET_TICKERS = {
@@ -382,7 +383,7 @@ def save_manual(items):
 # ─────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="JM Financial | Risk Intelligence",
+    page_title="Risk News Intelligence",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -515,7 +516,7 @@ section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button {
 .live-dot {
     width:8px; height:8px; background:#4caf50;
     border-radius:50%; display:inline-block; margin-right:6px;
-    animation: pulse 2s infinite;
+    animation: pulse 10s infinite;
 }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.25} }
 .refresh-timer { font-size:10pt !important; color:#90caf9; }
