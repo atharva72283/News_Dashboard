@@ -797,13 +797,9 @@ with st.sidebar:
         col1, col2 = st.columns(2)
 
         with col1:
-            # This renders as a dark "Browse files" button inside the dark uploader box
-            uploaded_excel = st.file_uploader(
-                label="📂 Import Portfolio",
-                type=["xlsx","xls"],
-                key="portfolio_upload",
-                label_visibility="visible",
-            )
+            # Spacer to vertically align delete button with the uploader button
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if st.button("🗑 Delete", use_container_width=True, key="btn_delete")
 
         with col2:
             # Spacer to vertically align delete button with the uploader button
