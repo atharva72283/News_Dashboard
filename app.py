@@ -806,7 +806,7 @@ with st.sidebar:
         logs = load_login_logs()
         log_count = len(logs)
         st.markdown(
-            f"<div style='font-size:9.5pt;color:#90caf9;margin:2px 0 8px;'>"
+            f"<div style='font-size:9.5pt;color:#090E41;margin:2px 0 8px;'>"
             f"📋 {log_count} session{'s' if log_count!=1 else ''} recorded</div>",
             unsafe_allow_html=True
         )
