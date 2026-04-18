@@ -753,64 +753,68 @@ with st.sidebar:
     pwd      = st.text_input("Password", type="password", key="admin_pwd")
     is_admin = (pwd == ADMIN_PASSWORD)
 
-    if is_admin:
-        st.success("✅ Access granted")
-        st.markdown("#### 📂 Portfolio Import")
+    # 1. We define the "Pop-up" window function here
+@st.dialog("Portfolio Import")
+def import_portfolio_popup():
+    st.write("Upload your Excel file to refresh the portfolio data.")
+    uploaded_excel = st.file_uploader(
+        label="Select Excel (.xlsx)",
+        type=["xlsx", "xls"],
+        key="portfolio_upload_modal"
+    )
+    
+    if uploaded_excel is not None:
+        with st.spinner("Parsing Excel..."):
+            # Uses your existing parsing function
+            new_port, err = parse_excel_portfolio(uploaded_excel)
+            
+        if new_port:
+            st.session_state["portfolio"] = new_port
+            # Auto-close and save
+            save_portfolio(new_port)
+            st.cache_data.clear()
+            st.success(f"✅ {len(new_port)} stocks imported!")
+            st.rerun() 
+        else:
+            st.error(f"❌ {err}")
 
-        # Status line
-        current_port = st.session_state.get("portfolio", load_portfolio())
-        total_pos    = sum(p.get("position_crs",0) for p in current_port)
-        st.markdown(
-            f"<div style='font-size:9.5pt;color:#90caf9;margin:2px 0 8px;'>"
-            f"📌 {len(current_port)} stocks loaded"
-            + (f" · ₹{total_pos:,.1f} Cr" if total_pos>0 else "")
-            + "</div>", unsafe_allow_html=True
-        )
+# 2. Your main UI logic starts here
+if is_admin:
+    st.success("✅ Access granted")
+    st.markdown("#### 📂 Portfolio Import")
 
-        # ── TWO BUTTONS SIDE BY SIDE ──────────────────────────
-        # Both match the sidebar dark style exactly.
-        # "Import Portfolio" toggles the file uploader open/closed.
-        # "Delete Portfolio" clears data immediately.
-        # ─────────────────────────────────────────────────────
-        col_imp, col_del = st.columns(2)
-        with col_imp:
-            if st.button("📂 Import", use_container_width=True, key="btn_import"):
-                # Toggle uploader visibility
-                st.session_state["show_uploader"] = not st.session_state["show_uploader"]
-        with col_del:
-            if st.button("🗑 Delete", use_container_width=True, key="btn_delete"):
-                st.session_state["portfolio"]     = DEFAULT_PORTFOLIO
-                st.session_state["show_uploader"] = False
-                if os.path.exists(PORTFOLIO_FILE): os.remove(PORTFOLIO_FILE)
-                st.cache_data.clear()
-                st.rerun()
+    # Status line
+    current_port = st.session_state.get("portfolio", load_portfolio())
+    total_pos    = sum(p.get("position_crs", 0) for p in current_port)
+    st.markdown(
+        f"<div style='font-size:9.5pt;color:#90caf9;margin:2px 0 8px;'>"
+        f"📌 {len(current_port)} stocks loaded"
+        + (f" · ₹{total_pos:,.1f} Cr" if total_pos > 0 else "")
+        + "</div>", unsafe_allow_html=True
+    )
 
-        # File uploader — visible only when Import is toggled on.
-        # Uses st.session_state["show_uploader"] flag.
-        # This is the CORRECT pattern — no CSS hiding needed,
-        # so the uploader is always fully functional when shown.
-        if st.session_state.get("show_uploader", False):
-            uploaded_excel = st.file_uploader(
-                label="Upload Excel (.xlsx)",
-                type=["xlsx","xls"],
-                key="portfolio_upload",
-                label_visibility="visible",
-            )
-            if uploaded_excel is not None:
-                with st.spinner("Parsing Excel..."):
-                    new_port, err = parse_excel_portfolio(uploaded_excel)
-                if new_port:
-                    st.session_state["portfolio"]     = new_port
-                    st.session_state["show_uploader"] = False   # auto-close after success
-                    save_portfolio(new_port)
-                    st.cache_data.clear()
-                    st.success(f"✅ {len(new_port)} stocks imported!")
-                    st.rerun()
-                else:
-                    st.error(f"❌ {err}")
+    # ── TWO BUTTONS SIDE BY SIDE ──────────────────────────
+    col_imp, col_del = st.columns(2)
+    
+    with col_imp:
+        # Instead of toggling a flag, this now opens the Pop-up directly
+        if st.button("📂 Import", use_container_width=True, key="btn_import"):
+            import_portfolio_popup()
 
-        st.markdown("---")
+    with col_del:
+        if st.button("🗑 Delete", use_container_width=True, key="btn_delete"):
+            st.session_state["portfolio"] = DEFAULT_PORTFOLIO
+            # We don't need the uploader flag anymore, but keeping it False for safety
+            st.session_state["show_uploader"] = False 
+            if os.path.exists(PORTFOLIO_FILE): 
+                os.remove(PORTFOLIO_FILE)
+            st.cache_data.clear()
+            st.rerun()
 
+    # NOTE: The "if st.session_state.get('show_uploader')" block is GONE.
+    # The uploader now lives inside the import_portfolio_popup() function.
+
+    st.markdown("---")
         # ── PUSH HEADLINE ──
         st.markdown("#### 📢 Push Internal Headline")
         new_title = st.text_area("Headline text", height=68, key="adm_title",
