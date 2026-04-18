@@ -805,15 +805,6 @@ with st.sidebar:
                 label_visibility="visible",
             )
 
-        with col2:
-            # Spacer to vertically align delete button with the uploader button
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            if st.button("🗑 Delete", use_container_width=True, key="btn_delete"):
-                st.session_state["portfolio"] = DEFAULT_PORTFOLIO
-                if os.path.exists(PORTFOLIO_FILE): os.remove(PORTFOLIO_FILE)
-                st.cache_data.clear()
-                st.rerun()
-
         if uploaded_excel is not None:
             with st.spinner("Parsing..."):
                 new_port, err = parse_excel_portfolio(uploaded_excel)
@@ -827,6 +818,17 @@ with st.sidebar:
                 st.error(f"❌ {err}")
 
         st.markdown("---")
+        
+        with col2:
+            # Spacer to vertically align delete button with the uploader button
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if st.button("🗑 Delete", use_container_width=True, key="btn_delete"):
+                st.session_state["portfolio"] = DEFAULT_PORTFOLIO
+                if os.path.exists(PORTFOLIO_FILE): os.remove(PORTFOLIO_FILE)
+                st.cache_data.clear()
+                st.rerun()
+
+        
 
         # ── PUSH HEADLINE ──
         st.markdown("#### 📢 Push Internal Headline")
