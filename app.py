@@ -787,48 +787,47 @@ with st.sidebar:
             + "</div>", unsafe_allow_html=True
         )
 
-        # --- TWO BUTTONS: Import | Delete ---
-         col1, col2 = st.columns(2)
-         
-         with col1:
-             # We put the "Header" text here so it sits above the uploader
-             st.markdown("<span style='font-size:14px; font-weight:bold;'>📂 Import Portfolio</span>", unsafe_allow_html=True)
-             
-             # This is the uploader. 
-             # We set label_visibility="collapsed" so it doesn't waste space inside the box.
-             uploaded_excel = st.file_uploader(
-                 label="import_hidden", 
-                 type=["xlsx","xls"],
-                 key="portfolio_upload",
-                 label_visibility="collapsed", # This hides the extra text label
-             )
-         
-         with col2:
-             # This empty div acts as a spacer. 
-             # If the Delete button is too high or too low, change '32px' to a different number.
-             st.markdown("<div style='height:32px'></div>", unsafe_allow_html=True)
-             
-             if st.button("🗑 Delete", use_container_width=True, key="btn_delete"):
-                 st.session_state["portfolio"] = DEFAULT_PORTFOLIO
-                 if os.path.exists(PORTFOLIO_FILE): 
-                     os.remove(PORTFOLIO_FILE)
-                 st.cache_data.clear()
-                 st.rerun()
-         
-         # --- Logic for handling the file (Keep this exactly as you had it) ---
-         if uploaded_excel is not None:
-             with st.spinner("Parsing..."):
-                 new_port, err = parse_excel_portfolio(uploaded_excel)
-             if new_port:
-                 st.session_state["portfolio"] = new_port
-                 save_portfolio(new_port)
-                 st.cache_data.clear()
-                 st.success(f"✅ {len(new_port)} stocks imported!")
-                 st.rerun()
-             else:
-                 st.error(f"❌ {err}")
-         
-         st.markdown("---")
+        # ── TWO BUTTONS: Import (file uploader) | Delete ────────────────
+        # The file uploader IS the Import button.
+        # CSS above hides the drag-drop text and makes only the "Browse files"
+        # button visible, styled dark to match sidebar.
+        # One click on "Browse files" → OS file picker opens directly.
+        # No toggle, no second step.
+        # ─────────────────────────────────────────────────────────────────
+        col1, col2 = st.columns(2)
+
+        with col1:
+            # This renders as a dark "Browse files" button inside the dark uploader box
+            uploaded_excel = st.file_uploader(
+                label="📂 Import Portfolio",
+                type=["xlsx","xls"],
+                key="portfolio_upload",
+                label_visibility="visible",
+            )
+
+        with col2:
+            # Spacer to vertically align delete button with the uploader button
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if st.button("🗑 Delete", use_container_width=True, key="btn_delete"):
+                st.session_state["portfolio"] = DEFAULT_PORTFOLIO
+                if os.path.exists(PORTFOLIO_FILE): os.remove(PORTFOLIO_FILE)
+                st.cache_data.clear()
+                st.rerun()
+
+        if uploaded_excel is not None:
+            with st.spinner("Parsing..."):
+                new_port, err = parse_excel_portfolio(uploaded_excel)
+            if new_port:
+                st.session_state["portfolio"] = new_port
+                save_portfolio(new_port)
+                st.cache_data.clear()
+                st.success(f"✅ {len(new_port)} stocks imported!")
+                st.rerun()
+            else:
+                st.error(f"❌ {err}")
+
+        st.markdown("---")
+
         # ── PUSH HEADLINE ──
         st.markdown("#### 📢 Push Internal Headline")
         new_title = st.text_area("Headline text", height=68, key="adm_title",
