@@ -8,3 +8,4 @@ yfinance
 pytz
 pandas
 openpyxl
+fpdf2
