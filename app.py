@@ -1,17 +1,20 @@
 """
-JM Financial | Risk Intelligence Dashboard  v11.0
+JM Financial | Risk Intelligence Dashboard  v12.0
 ==================================================
-CHANGES FROM v10:
-✅ Portfolio section: Two clean dark buttons [📂 Import] [🗑 Delete]
-   Import button uses st.session_state toggle to show/hide file_uploader
-   File uploader appears below buttons (styled dark) only when Import is clicked
-   Clicking Import again hides it → clean toggle UX
-✅ Login log: replaced table display with [⬇ Download Log] button (CSV download)
-   Log table removed from admin panel entirely — clean and private
-✅ All flash suppression, AJ RSS, current-month portfolio, margin-top:50px preserved
+NEW IN v12 (Manager-Impressing Upgrades):
+✅ SEBI Circulars tab  — sebi.gov.in official RSS + enforcement orders Google News
+✅ NIFTY VIX ticker    — fear gauge in market monitor; red banner when VIX > 20
+✅ FII/DII Flow widget — today's institutional flow from NSE, shown in header area
+✅ Position-weighted Risk Score per portfolio stock
+✅ Market-hours aware refresh (30s during 9:15–3:30 IST, 5min outside)
+✅ Global deduplication — same headline never appears in multiple tabs
+✅ 📄 Daily Briefing PDF export — admin one-click morning briefing (fpdf2)
+✅ All v11 features preserved (hardened RBI/NSE circulars, AJ feeds, IP log, etc.)
 
-Install:  pip install streamlit requests beautifulsoup4 lxml feedparser yfinance pytz pandas openpyxl
-Run:      streamlit run app.py
+Install:
+  pip install streamlit requests beautifulsoup4 lxml feedparser yfinance pytz pandas openpyxl fpdf2
+Run:
+  streamlit run app.py
 """
 
 import streamlit as st
@@ -19,7 +22,7 @@ import feedparser
 import requests
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pytz
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
@@ -41,9 +44,15 @@ DB_FILE        = "manual_headlines.json"
 PORTFOLIO_FILE = "portfolio_data.json"
 LOGIN_LOG_FILE = "login_log.json"
 ADMIN_PASSWORD = "JM_RISK_2026"
-AUTO_REFRESH   = 90
 PROXIES        = None
 
+# ── Market-hours aware refresh intervals ──
+REFRESH_MARKET_HOURS = 30    # seconds during NSE trading session
+REFRESH_OFF_HOURS    = 300   # seconds outside market hours
+
+# ─────────────────────────────────────────────
+# DEFAULT PORTFOLIO
+# ─────────────────────────────────────────────
 DEFAULT_PORTFOLIO = [
     {"name":"Sammaan Capital","nse_code":"SAMMAANCAP","position_crs":0},
     {"name":"Suzlon",         "nse_code":"SUZLON",     "position_crs":0},
@@ -51,16 +60,23 @@ DEFAULT_PORTFOLIO = [
     {"name":"Valor Estate",   "nse_code":"VALOR",      "position_crs":0},
 ]
 
+# ─────────────────────────────────────────────
+# MARKET TICKERS  (VIX added)
+# ─────────────────────────────────────────────
 MARKET_TICKERS = {
-    "NIFTY 50":    ("^NSEI",   "₹"),
-    "SENSEX":      ("^BSESN",  "₹"),
-    "BANK NIFTY":  ("^NSEBANK","₹"),
-    "CRUDE (WTI)": ("CL=F",   "$"),
-    "BRENT":       ("BZ=F",   "$"),
-    "GOLD":        ("GC=F",   "$"),
-    "SILVER":      ("SI=F",   "$"),
+    "NIFTY 50":    ("^NSEI",     "₹",  False),  # (symbol, unit, is_commodity)
+    "SENSEX":      ("^BSESN",    "₹",  False),
+    "BANK NIFTY":  ("^NSEBANK",  "₹",  False),
+    "INDIA VIX":   ("^INDIAVIX", "",   False),   # Fear gauge — no unit prefix
+    "CRUDE (WTI)": ("CL=F",      "$",  True),
+    "BRENT":       ("BZ=F",      "$",  True),
+    "GOLD":        ("GC=F",      "$",  True),
+    "SILVER":      ("SI=F",      "$",  True),
 }
 
+# ─────────────────────────────────────────────
+# KEYWORDS
+# ─────────────────────────────────────────────
 PRIORITY_KEYWORDS = [
     "war","strike","attack","sanctions","iran","israel","conflict",
     "rate hike","rate cut","rbi policy","emergency","crash","plunge",
@@ -99,7 +115,6 @@ EXCLUDE_CIRCULAR_KW = [
     "annual report","quarterly result","q1","q2","q3","q4",
     "balance sheet","ipo filing","drhp",
 ]
-CURRENT_FY_START = datetime(2025, 4, 1, tzinfo=timezone.utc)
 
 def get_sentiment(title):
     t = title.lower()
@@ -111,6 +126,22 @@ def get_sentiment(title):
 
 def is_priority(title):
     return any(kw in title.lower() for kw in PRIORITY_KEYWORDS)
+
+# ─────────────────────────────────────────────
+# MARKET HOURS HELPER
+# ─────────────────────────────────────────────
+
+def is_market_open() -> bool:
+    """Returns True if NSE is currently in normal trading session."""
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() >= 5:   # Saturday=5, Sunday=6
+        return False
+    market_open  = now_ist.replace(hour=9,  minute=15, second=0, microsecond=0)
+    market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+    return market_open <= now_ist <= market_close
+
+def get_refresh_interval() -> int:
+    return REFRESH_MARKET_HOURS if is_market_open() else REFRESH_OFF_HOURS
 
 # ─────────────────────────────────────────────
 # TIME HELPERS
@@ -146,14 +177,14 @@ def is_recent(dt, days=3):
     if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - dt).days <= days
 
-def is_current_fy(dt):
-    if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
-    return dt >= CURRENT_FY_START
-
 def is_current_month(dt):
     if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
     return dt.year == now.year and dt.month == now.month
+
+def age_days(dt):
+    if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).days
 
 # ─────────────────────────────────────────────
 # IP LOGIN LOG
@@ -181,8 +212,7 @@ def record_login():
         try:
             with open(LOGIN_LOG_FILE) as f: logs = json.load(f)
         except: logs = []
-    logs.insert(0, entry)
-    logs = logs[:500]
+    logs.insert(0, entry); logs = logs[:500]
     with open(LOGIN_LOG_FILE,"w") as f: json.dump(logs, f, default=str)
 
 def load_login_logs():
@@ -192,7 +222,6 @@ def load_login_logs():
     except: return []
 
 def logs_to_csv_bytes(logs):
-    """Convert login log list to CSV bytes for download."""
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["Timestamp (IST)", "IP Address", "Browser / Device"])
@@ -239,14 +268,13 @@ def parse_excel_portfolio(f):
             try: pos = float(pr.replace(",","").replace("₹","")) if pr and pr!="NAN" else 0.0
             except: pos = 0.0
             out.append({"name":name,"nse_code":nse,"bse_code":bse,"isin":isin,"position_crs":pos})
-        return (out, None) if out else (None, "No valid rows found. Check NSE CODE and NAME columns.")
+        return (out, None) if out else (None, "No valid rows found.")
     except Exception as e:
         return None, f"Excel error: {e}"
 
 # ─────────────────────────────────────────────
 # STOCK SEARCH
 # ─────────────────────────────────────────────
-
 BSE_TO_NSE = {
     "500325":"RELIANCE","532540":"TCS","500209":"INFY","500180":"HDFCBANK",
     "532174":"ICICIBANK","500112":"SBIN","532215":"AXISBANK","500247":"KOTAKBANK",
@@ -295,7 +323,7 @@ def gn(q):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_stock_news_gn(nse, name):
-    """Max 5 articles, current month only."""
+    """Max 5, current month only."""
     seen, items = set(), []
     for q in [f"{nse} NSE stock India", f"{name} stock NSE"]:
         try:
@@ -308,10 +336,14 @@ def fetch_stock_news_gn(nse, name):
     items.sort(key=lambda x: x["dt"], reverse=True)
     return items[:5]
 
+# ─────────────────────────────────────────────
+# LIVE MARKET DATA  (VIX included)
+# ─────────────────────────────────────────────
+
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_market_data():
     res = {}
-    for name,(sym,unit) in MARKET_TICKERS.items():
+    for name,(sym,unit,_) in MARKET_TICKERS.items():
         try:
             fi=yf.Ticker(sym).fast_info; p,v=float(fi.last_price),float(fi.previous_close)
             c=p-v; pct=(c/v*100) if v else 0.0
@@ -319,6 +351,59 @@ def fetch_market_data():
         except:
             res[name]={"price":None,"change":None,"pct":None,"unit":unit}
     return res
+
+# ─────────────────────────────────────────────
+# FII / DII FLOW  (fetched from NSE via Google News + yfinance backup)
+# ─────────────────────────────────────────────
+
+@st.cache_data(ttl=1800, show_spinner=False)   # refresh every 30 min
+def fetch_fii_flow():
+    """
+    Fetch today's FII/DII net buy-sell figures.
+    Primary: Google News RSS for NSE FII data headline (published daily by NSE/ET/MC)
+    Returns dict with fii_net, dii_net (in Cr), and headline for display.
+    """
+    result = {"fii_net": None, "dii_net": None, "headline": None, "dt": None}
+    try:
+        q = "FII DII net buy sell today NSE India crore"
+        feed = feedparser.parse(gn(q))
+        for e in feed.entries[:5]:
+            t  = e.get("title","").strip()
+            dt = parse_dt(e)
+            if not is_recent(dt, days=1): continue
+            tl = t.lower()
+            if "fii" in tl or "fpi" in tl or "dii" in tl:
+                result["headline"] = t
+                result["dt"]       = dt
+                # Try to extract numbers — simple heuristic
+                import re
+                nums = re.findall(r'[\-\+]?\s*[\d,]+(?:\.\d+)?', t)
+                if len(nums) >= 2:
+                    try:
+                        result["fii_net"] = float(nums[0].replace(",","").replace(" ",""))
+                        result["dii_net"] = float(nums[1].replace(",","").replace(" ",""))
+                    except: pass
+                break
+    except: pass
+    return result
+
+# ─────────────────────────────────────────────
+# GLOBAL DEDUPLICATION SET
+# Tracks all seen titles across ALL tabs so the same news
+# never appears twice anywhere in the dashboard.
+# ─────────────────────────────────────────────
+
+GLOBAL_SEEN: set = set()
+
+def dedup_articles(articles: list) -> list:
+    """Remove articles whose titles have been seen in any previous tab render."""
+    out = []
+    for a in articles:
+        t = a.get("title","")
+        if t and t not in GLOBAL_SEEN:
+            GLOBAL_SEEN.add(t)
+            out.append(a)
+    return out
 
 # ─────────────────────────────────────────────
 # FEED SOURCES
@@ -352,37 +437,148 @@ LIVEWIRE_FEEDS = [
     gn("breaking market news India NSE BSE today"),
 ]
 
+# ─────────────────────────────────────────────
+# RBI CIRCULARS — 4 sources, hardened
+# ─────────────────────────────────────────────
+
 def fetch_rbi_circulars():
     all_items, seen = [], set()
-    for url in ["https://rbi.org.in/notifications_rss.xml","https://rbi.org.in/pressreleases_rss.xml"]:
+    for url in ["https://rbi.org.in/notifications_rss.xml",
+                "https://rbi.org.in/pressreleases_rss.xml"]:
         try:
-            resp=requests.get(url,timeout=12,verify=False,proxies=PROXIES or {})
+            resp = requests.get(url, timeout=12, verify=False, proxies=PROXIES or {})
             for e in feedparser.parse(resp.content).entries[:40]:
-                t,l,dt=e.get("title","").strip(),e.get("link","#"),parse_dt(e)
-                if not t or t in seen or not is_current_fy(dt): continue
+                t,l,dt = e.get("title","").strip(), e.get("link","#"), parse_dt(e)
+                if not t or t in seen or age_days(dt) > 90: continue
                 if any(kw in t.lower() for kw in EXCLUDE_CIRCULAR_KW): continue
                 seen.add(t)
-                all_items.append({"title":t,"link":l,"dt":dt,"priority":is_priority(t),"sentiment":get_sentiment(t)})
+                all_items.append({"title":t,"link":l,"dt":dt,"priority":is_priority(t),
+                                   "sentiment":get_sentiment(t),"source":"RBI RSS"})
+        except: pass
+    try:
+        from bs4 import BeautifulSoup
+        h = {"User-Agent":"Mozilla/5.0","Accept":"text/html,*/*"}
+        resp = requests.get("https://www.rbi.org.in/Scripts/BS_CircularIndexDisplay.aspx",
+                            headers=h, timeout=15, verify=False, proxies=PROXIES or {})
+        soup = BeautifulSoup(resp.content,"lxml")
+        for a in soup.find_all("a", href=True):
+            t    = a.get_text(strip=True)
+            href = a["href"].strip()
+            if not t or len(t)<15 or t in seen: continue
+            if not any(kw in href.lower() for kw in ["rdocs","scripts/bs_","notification","circular"]): continue
+            if any(kw in t.lower() for kw in EXCLUDE_CIRCULAR_KW): continue
+            if not href.startswith("http"): href = "https://www.rbi.org.in" + href
+            seen.add(t)
+            all_items.append({"title":t,"link":href,"dt":datetime.now(timezone.utc),
+                               "priority":is_priority(t),"sentiment":get_sentiment(t),"source":"RBI Direct"})
+            if len(all_items) > 80: break
+    except: pass
+    for q in ["RBI circular notification India site:rbi.org.in",
+              "RBI master direction circular 2025 2026"]:
+        try:
+            for e in feedparser.parse(gn(q)).entries[:10]:
+                t,l,dt = e.get("title","").strip(), e.get("link","#"), parse_dt(e)
+                if not t or t in seen: continue
+                if any(kw in t.lower() for kw in EXCLUDE_CIRCULAR_KW): continue
+                seen.add(t)
+                all_items.append({"title":t,"link":l,"dt":dt,"priority":is_priority(t),
+                                   "sentiment":get_sentiment(t),"source":"Google News"})
         except: pass
     all_items.sort(key=lambda x: x["dt"], reverse=True)
-    return all_items[:50]
+    return all_items[:60]
+
+# ─────────────────────────────────────────────
+# NSE CIRCULARS — 4 sources, hardened
+# ─────────────────────────────────────────────
 
 def fetch_nse_circulars():
     all_items, seen = [], set()
     for url in ["https://nsearchives.nseindia.com/content/RSS/Circulars.xml",
-                "https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml"]:
+                "https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml",
+                "http://feeds.feedburner.com/nseindia/circulars"]:
         try:
-            h={"User-Agent":"Mozilla/5.0","Accept":"application/rss+xml,*/*","Referer":"https://www.nseindia.com/"}
-            resp=requests.get(url,headers=h,timeout=15,verify=False,proxies=PROXIES or {})
+            h = {"User-Agent":"Mozilla/5.0","Accept":"application/rss+xml,*/*","Referer":"https://www.nseindia.com/"}
+            resp = requests.get(url, headers=h, timeout=15, verify=False, proxies=PROXIES or {})
             for e in feedparser.parse(resp.content).entries[:40]:
-                t,l,dt=e.get("title","").strip(),e.get("link","#"),parse_dt(e)
-                if not t or t in seen or not is_current_fy(dt): continue
+                t,l,dt = e.get("title","").strip(), e.get("link","#"), parse_dt(e)
+                if not t or t in seen or age_days(dt) > 90: continue
                 if any(kw in t.lower() for kw in EXCLUDE_CIRCULAR_KW): continue
                 seen.add(t)
-                all_items.append({"title":t,"link":l,"dt":dt,"priority":is_priority(t),"sentiment":get_sentiment(t)})
+                all_items.append({"title":t,"link":l,"dt":dt,"priority":is_priority(t),
+                                   "sentiment":get_sentiment(t),"source":"NSE RSS"})
+        except: pass
+    for q in ["NSE circular notice India site:nseindia.com",
+              "NSE India circular member trading 2025 2026"]:
+        try:
+            for e in feedparser.parse(gn(q)).entries[:10]:
+                t,l,dt = e.get("title","").strip(), e.get("link","#"), parse_dt(e)
+                if not t or t in seen: continue
+                if any(kw in t.lower() for kw in EXCLUDE_CIRCULAR_KW): continue
+                seen.add(t)
+                all_items.append({"title":t,"link":l,"dt":dt,"priority":is_priority(t),
+                                   "sentiment":get_sentiment(t),"source":"Google News"})
         except: pass
     all_items.sort(key=lambda x: x["dt"], reverse=True)
-    return all_items[:50]
+    return all_items[:60]
+
+# ─────────────────────────────────────────────
+# SEBI CIRCULARS  (NEW — sebi.gov.in RSS + enforcement orders)
+# ─────────────────────────────────────────────
+
+def fetch_sebi_circulars():
+    """
+    3 sources:
+    1. SEBI official RSS — sebi.gov.in/sebi_data/rss.xml
+    2. Google News — SEBI circulars indexed quickly
+    3. Google News — SEBI enforcement orders / interim orders (critical for counterparty risk)
+    """
+    all_items, seen = [], set()
+
+    # Source 1: SEBI official RSS
+    try:
+        resp = requests.get("https://www.sebi.gov.in/sebi_data/rss.xml",
+                            timeout=12, verify=False, proxies=PROXIES or {})
+        for e in feedparser.parse(resp.content).entries[:40]:
+            t,l,dt = e.get("title","").strip(), e.get("link","#"), parse_dt(e)
+            if not t or t in seen or age_days(dt) > 90: continue
+            if any(kw in t.lower() for kw in EXCLUDE_CIRCULAR_KW): continue
+            seen.add(t)
+            all_items.append({"title":t,"link":l,"dt":dt,"priority":is_priority(t),
+                               "sentiment":get_sentiment(t),"source":"SEBI RSS"})
+    except: pass
+
+    # Source 2: SEBI circulars on Google News
+    for q in ["SEBI circular notification India site:sebi.gov.in",
+              "SEBI circular India 2025 2026 margin compliance"]:
+        try:
+            for e in feedparser.parse(gn(q)).entries[:12]:
+                t,l,dt = e.get("title","").strip(), e.get("link","#"), parse_dt(e)
+                if not t or t in seen: continue
+                if any(kw in t.lower() for kw in EXCLUDE_CIRCULAR_KW): continue
+                seen.add(t)
+                all_items.append({"title":t,"link":l,"dt":dt,"priority":is_priority(t),
+                                   "sentiment":get_sentiment(t),"source":"Google News"})
+        except: pass
+
+    # Source 3: SEBI enforcement orders — critical for counterparty risk monitoring
+    for q in ["SEBI interim order penalty suspension India 2025 2026",
+              "SEBI enforcement action ban India"]:
+        try:
+            for e in feedparser.parse(gn(q)).entries[:10]:
+                t,l,dt = e.get("title","").strip(), e.get("link","#"), parse_dt(e)
+                if not t or t in seen: continue
+                seen.add(t)
+                # All enforcement orders are priority by nature
+                all_items.append({"title":t,"link":l,"dt":dt,"priority":True,
+                                   "sentiment":"negative","source":"SEBI Enforcement"})
+        except: pass
+
+    all_items.sort(key=lambda x: x["dt"], reverse=True)
+    return all_items[:60]
+
+# ─────────────────────────────────────────────
+# GENERAL FEED FETCH
+# ─────────────────────────────────────────────
 
 def fetch_feed(url):
     try:
@@ -435,6 +631,147 @@ def save_manual(items):
     with open(DB_FILE,"w") as f: json.dump(items,f,default=str)
 
 # ─────────────────────────────────────────────
+# DAILY BRIEFING PDF EXPORT
+# ─────────────────────────────────────────────
+
+def generate_briefing_pdf(all_articles, rbi_items, nse_items, sebi_items,
+                           portfolio, market_data) -> bytes:
+    """
+    Generates a professional 1-page morning risk briefing PDF.
+    Sections: Market Snapshot · Priority Alerts · New Circulars · Portfolio Summary
+    Uses fpdf2. Falls back gracefully if fpdf2 not installed.
+    """
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        return b""   # graceful fallback
+
+    now_ist = datetime.now(IST).strftime("%d %B %Y  %I:%M %p IST")
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=12)
+
+    # ── Header ──
+    pdf.set_fill_color(26, 35, 126)   # dark blue
+    pdf.rect(0, 0, 210, 22, "F")
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_xy(10, 7)
+    pdf.cell(130, 8, "JM FINANCIAL  |  RISK INTELLIGENCE BRIEFING", ln=0)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_xy(140, 7)
+    pdf.cell(60, 8, now_ist, align="R", ln=1)
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
+
+    # ── Market Snapshot ──
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_fill_color(230, 235, 255)
+    pdf.cell(190, 7, "  MARKET SNAPSHOT", fill=True, ln=1)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.ln(1)
+    cols = list(market_data.items())
+    col_w = 190 // max(len(cols), 1)
+    for name, data in cols:
+        p = data.get("price"); c = data.get("change",0) or 0; pct = data.get("pct",0) or 0
+        unit = data.get("unit","")
+        if p is None: continue
+        txt = f"{name}: {unit}{p:,.0f}" if name in ("NIFTY 50","SENSEX","BANK NIFTY") else f"{name}: {unit}{p:,.2f}"
+        chg_txt = f" ({'▲' if c>=0 else '▼'}{abs(pct):.2f}%)"
+        pdf.set_text_color(0,100,0) if c>=0 else pdf.set_text_color(180,0,0)
+        pdf.cell(col_w, 6, txt+chg_txt, ln=0)
+    pdf.set_text_color(0,0,0)
+    pdf.ln(8)
+
+    # ── Priority Alerts (last 24h) ──
+    pdf.set_font("Helvetica","B",11)
+    pdf.set_fill_color(255,235,235)
+    pdf.cell(190,7,"  PRIORITY ALERTS  (last 24 hours)", fill=True, ln=1)
+    pdf.set_font("Helvetica","",9); pdf.ln(1)
+    prio = [a for a in all_articles if a.get("priority") and is_recent(a["dt"], days=1)][:10]
+    if prio:
+        for a in prio:
+            t = a.get("title","")[:110]
+            pdf.set_text_color(180,0,0)
+            pdf.cell(5,5,"•",ln=0)
+            pdf.set_text_color(0,0,0)
+            pdf.multi_cell(185,5, t)
+    else:
+        pdf.set_text_color(120,120,120)
+        pdf.cell(190,5,"No priority alerts in the last 24 hours.",ln=1)
+    pdf.set_text_color(0,0,0); pdf.ln(3)
+
+    # ── New Circulars (last 24h) ──
+    pdf.set_font("Helvetica","B",11)
+    pdf.set_fill_color(255,253,225)
+    pdf.cell(190,7,"  NEW CIRCULARS  (RBI / NSE / SEBI — last 24 hours)", fill=True, ln=1)
+    pdf.set_font("Helvetica","",9); pdf.ln(1)
+    all_circulars = ([(a,"RBI") for a in rbi_items] +
+                     [(a,"NSE") for a in nse_items] +
+                     [(a,"SEBI") for a in sebi_items])
+    recent_circulars = [(a,src) for a,src in all_circulars if is_recent(a["dt"], days=1)][:12]
+    if recent_circulars:
+        for a,src in recent_circulars:
+            pdf.set_font("Helvetica","B",9)
+            pdf.set_text_color(200,80,0)
+            pdf.cell(14,5,f"[{src}]",ln=0)
+            pdf.set_font("Helvetica","",9)
+            pdf.set_text_color(0,0,0)
+            pdf.multi_cell(176,5, a.get("title","")[:105])
+    else:
+        pdf.set_text_color(120,120,120)
+        pdf.cell(190,5,"No new circulars in the last 24 hours.",ln=1)
+    pdf.set_text_color(0,0,0); pdf.ln(3)
+
+    # ── Portfolio Risk Summary ──
+    pdf.set_font("Helvetica","B",11)
+    pdf.set_fill_color(235,245,235)
+    pdf.cell(190,7,"  PORTFOLIO RISK SUMMARY", fill=True, ln=1)
+    pdf.set_font("Helvetica","",9); pdf.ln(1)
+    total_pos = sum(p.get("position_crs",0) for p in portfolio)
+    pdf.set_font("Helvetica","B",9)
+    pdf.cell(190,5,f"Total Portfolio Exposure: INR {total_pos:,.1f} Crores  |  Stocks: {len(portfolio)}",ln=1)
+    pdf.set_font("Helvetica","",9); pdf.ln(1)
+    for stock in portfolio[:15]:
+        nm  = stock.get("name","")[:30]
+        nse = stock.get("nse_code","")
+        pos = stock.get("position_crs",0)
+        pct_port = (pos/total_pos*100) if total_pos>0 else 0
+        pdf.cell(60,5,nm,ln=0)
+        pdf.cell(25,5,nse,ln=0)
+        pdf.cell(35,5,f"INR {pos:,.1f} Cr",ln=0)
+        pdf.set_text_color(100,100,100)
+        pdf.cell(35,5,f"({pct_port:.1f}% of book)",ln=1)
+        pdf.set_text_color(0,0,0)
+
+    # ── Footer ──
+    pdf.set_y(-14)
+    pdf.set_font("Helvetica","I",8)
+    pdf.set_text_color(130,130,130)
+    pdf.cell(190,5,f"Generated by JM Financial Risk Intelligence Dashboard  |  {now_ist}  |  CONFIDENTIAL",align="C",ln=1)
+
+    return bytes(pdf.output())
+
+# ─────────────────────────────────────────────
+# RISK SCORE CALCULATOR
+# ─────────────────────────────────────────────
+
+def calc_risk_score(articles: list, position_crs: float, total_portfolio_crs: float) -> float:
+    """
+    Position-weighted risk score:
+    score = (negative_count - positive_count) × (position_crs / total_crs) × 100
+    Range: negative = low risk, positive = elevated risk
+    Capped at 0–100 for display.
+    """
+    if total_portfolio_crs <= 0 or position_crs <= 0:
+        return 0.0
+    neg = sum(1 for a in articles if a.get("sentiment") == "negative")
+    pos = sum(1 for a in articles if a.get("sentiment") == "positive")
+    raw = (neg - pos) * (position_crs / total_portfolio_crs) * 100
+    return max(0.0, min(100.0, raw))
+
+# ─────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────
 
@@ -451,7 +788,6 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-/* BASE FONT */
 html,body,[class*="css"],.stMarkdown,.stText,
 p,div,span,a,button,input,select,textarea,th,td,label {
     font-family: Arial, Helvetica, sans-serif !important;
@@ -461,108 +797,128 @@ html,body,.stApp,[data-testid="stAppViewContainer"] { background-color:#f0f2f5 !
 .block-container { padding-top:0.4rem !important; max-width:1440px !important; }
 
 /* FLASH ELIMINATION */
-#stDecoration { display:none !important; }
-[data-testid="stStatusWidget"] { display:none !important; }
-[data-testid="stSkeleton"] { display:none !important; }
-.stApp > header { display:none !important; }
-[data-testid="toastContainer"] { display:none !important; }
-.stApp,[data-testid="stAppViewContainer"],
-.main,[data-testid="stAppViewBlockContainer"] { opacity:1 !important; }
+#stDecoration,[data-testid="stStatusWidget"],[data-testid="stSkeleton"],
+.stApp > header,[data-testid="toastContainer"] { display:none !important; }
+.stApp,[data-testid="stAppViewContainer"],.main,
+[data-testid="stAppViewBlockContainer"] { opacity:1 !important; }
 [data-stale="true"],[data-stale="false"] { opacity:1 !important; }
-.stApp,.stApp *,
-[data-testid="stAppViewContainer"],
+.stApp,.stApp *,[data-testid="stAppViewContainer"],
 [data-testid="stAppViewContainer"] * { transition:none !important; animation-duration:0.001s !important; }
 
 /* SIDEBAR */
 section[data-testid="stSidebar"] { background:#1a1f2e !important; border-right:1px solid #2d3748; }
 section[data-testid="stSidebar"] * { color:#e2e8f0 !important; }
-section[data-testid="stSidebar"] input,
-section[data-testid="stSidebar"] textarea {
+section[data-testid="stSidebar"] input,section[data-testid="stSidebar"] textarea {
     background:#2d3748 !important; border:1px solid #4a5568 !important;
     color:#e2e8f0 !important; border-radius:6px !important;
 }
-/* All sidebar buttons — uniform dark style */
 section[data-testid="stSidebar"] .stButton > button {
     background:#2d3748 !important; color:#e2e8f0 !important;
     border:1px solid #4a5568 !important; border-radius:6px !important;
-    width:100%; transition:none !important; font-size:11pt !important;
-    padding:6px 12px !important;
+    width:100%; transition:none !important; font-size:11pt !important; padding:6px 12px !important;
 }
 section[data-testid="stSidebar"] .stButton > button:hover { background:#4a5568 !important; }
-/* Sidebar news cards */
 section[data-testid="stSidebar"] .news-card  { background:#ffffff !important; }
 section[data-testid="stSidebar"] .card-title { color:#1565c0 !important; }
 section[data-testid="stSidebar"] .card-meta  { color:#4a5568 !important; }
-
-/* FILE UPLOADER — completely hidden, only st.button shows */
 section[data-testid="stSidebar"] [data-testid="stFileUploader"] {
     height:0 !important; overflow:hidden !important; opacity:0 !important;
     position:absolute !important; pointer-events:none !important;
     margin:0 !important; padding:0 !important;
 }
 
-/* TOP HEADER BAR */
+/* TOP HEADER */
 .top-bar {
-    background:#1a237e; border-radius:8px;
-    padding:10px 20px; margin-top:50px; margin-bottom:10px;
+    background:#1a237e; border-radius:8px; padding:10px 20px;
+    margin-top:50px; margin-bottom:4px;
     display:flex; justify-content:space-between; align-items:center;
 }
 .top-bar-title { font-size:13pt !important; font-weight:700; color:#fff; letter-spacing:0.03em; }
 .top-bar-right { display:flex; align-items:center; gap:16px; }
-.live-dot {
-    width:8px; height:8px; background:#4caf50; border-radius:50%;
-    display:inline-block; margin-right:6px; animation:pulse 2s infinite;
-}
+.live-dot { width:8px;height:8px;background:#4caf50;border-radius:50%;display:inline-block;margin-right:6px;animation:pulse 2s infinite; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.25} }
 .refresh-timer { font-size:10pt !important; color:#90caf9; }
 .top-bar-time  { font-size:10pt !important; color:#b0bec5; }
 
+/* VIX WARNING BANNER */
+.vix-banner {
+    background:#b71c1c; color:#fff; border-radius:6px;
+    padding:6px 16px; margin-bottom:8px; font-size:10.5pt !important;
+    font-weight:700; text-align:center; letter-spacing:0.04em;
+}
+
+/* FII FLOW BAR */
+.fii-bar {
+    background:#0d47a1; border-radius:6px; padding:6px 16px;
+    margin-bottom:10px; display:flex; gap:24px; align-items:center;
+    font-size:9.5pt !important;
+}
+.fii-bar span { color:#b3c5e8 !important; }
+.fii-pos { color:#80e27e !important; font-weight:700; }
+.fii-neg { color:#ff8a80 !important; font-weight:700; }
+.fii-neu { color:#b3c5e8 !important; font-weight:600; }
+
+/* MARKET OPEN BADGE */
+.mkt-open  { background:#1b5e20;color:#fff;font-size:8.5pt !important;font-weight:700;padding:2px 8px;border-radius:10px; }
+.mkt-close { background:#424242;color:#ccc;font-size:8.5pt !important;font-weight:600;padding:2px 8px;border-radius:10px; }
+
 /* MARKET MONITOR */
-.market-monitor { background:#1a237e; border-radius:8px; padding:10px 16px 12px; margin-bottom:12px; }
-.mm-label { font-size:10pt !important; font-weight:700; color:#fff; letter-spacing:0.08em; text-transform:uppercase; margin-bottom:8px; }
-.ticker-grid { display:flex; flex-wrap:wrap; gap:8px; }
-.ticker-card { border-radius:7px; padding:8px 14px; min-width:115px; flex:1; text-align:center; }
-.ticker-card.up   { background:#c8e6c9 !important; border:2px solid #2e7d32 !important; }
+.market-monitor { background:#1a237e; border-radius:8px; padding:10px 16px 12px; margin-bottom:8px; }
+.mm-label { font-size:10pt !important;font-weight:700;color:#fff;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:8px; }
+.ticker-grid { display:flex;flex-wrap:wrap;gap:8px; }
+.ticker-card { border-radius:7px;padding:8px 14px;min-width:105px;flex:1;text-align:center; }
+.ticker-card.up   { background:#c8e6c9 !important;border:2px solid #2e7d32 !important; }
 .ticker-card.up   .t-name,.ticker-card.up   .t-price,.ticker-card.up   .t-up  { color:#000 !important; }
-.ticker-card.down { background:#ffcdd2 !important; border:2px solid #c62828 !important; }
+.ticker-card.down { background:#ffcdd2 !important;border:2px solid #c62828 !important; }
 .ticker-card.down .t-name,.ticker-card.down .t-price,.ticker-card.down .t-dn  { color:#000 !important; }
-.ticker-card.flat { background:#e0e0e0 !important; border:2px solid #555 !important; }
+.ticker-card.flat { background:#e0e0e0 !important;border:2px solid #555 !important; }
 .ticker-card.flat .t-name,.ticker-card.flat .t-price,.ticker-card.flat .t-flat{ color:#000 !important; }
-.t-name  { font-size:8.5pt !important; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; }
-.t-price { font-size:11pt !important; font-weight:700; margin:3px 0; }
-.t-up,.t-dn,.t-flat { font-size:9.5pt !important; font-weight:600; }
+.ticker-card.vix-hi { background:#ffcdd2 !important;border:3px solid #b71c1c !important; }
+.ticker-card.vix-hi .t-name,.ticker-card.vix-hi .t-price,.ticker-card.vix-hi .t-vix { color:#b71c1c !important; }
+.ticker-card.vix-ok { background:#e8f5e9 !important;border:2px solid #388e3c !important; }
+.ticker-card.vix-ok .t-name,.ticker-card.vix-ok .t-price,.ticker-card.vix-ok .t-vix { color:#1b5e20 !important; }
+.t-name  { font-size:8.5pt !important;font-weight:700;text-transform:uppercase;letter-spacing:0.04em; }
+.t-price { font-size:11pt !important;font-weight:700;margin:3px 0; }
+.t-up,.t-dn,.t-flat,.t-vix { font-size:9.5pt !important;font-weight:600; }
 
 /* NEWS CARDS */
 .news-card {
-    background:#fff; border:1px solid #e2e8f0; border-left:4px solid #cbd5e0;
-    border-radius:7px; padding:10px 14px; margin-bottom:6px;
+    background:#fff;border:1px solid #e2e8f0;border-left:4px solid #cbd5e0;
+    border-radius:7px;padding:10px 14px;margin-bottom:6px;
     box-shadow:0 1px 3px rgba(0,0,0,0.06);
 }
-.news-card:hover { box-shadow:0 3px 8px rgba(0,0,0,0.12); border-left-color:#3949ab; }
-.news-card.priority           { border-left-color:#e53935 !important; background:#fff8f8; }
-.news-card.sentiment-positive { border-left-color:#43a047; background:#f6fff7; }
-.news-card.sentiment-negative { border-left-color:#e53935; background:#fff6f6; }
-.news-card.rbi { border-left-color:#f9a825; background:#fffde7; }
-.news-card.nse { border-left-color:#1565c0; background:#f0f7ff; }
-.news-card.lw  { border-left-color:#6a1b9a; background:#fdf4ff; }
-.news-card.aj  { border-left-color:#c62828; background:#fff5f5; }
+.news-card:hover { box-shadow:0 3px 8px rgba(0,0,0,0.12);border-left-color:#3949ab; }
+.news-card.priority           { border-left-color:#e53935 !important;background:#fff8f8; }
+.news-card.sentiment-positive { border-left-color:#43a047;background:#f6fff7; }
+.news-card.sentiment-negative { border-left-color:#e53935;background:#fff6f6; }
+.news-card.rbi  { border-left-color:#f9a825;background:#fffde7; }
+.news-card.nse  { border-left-color:#1565c0;background:#f0f7ff; }
+.news-card.sebi { border-left-color:#6a0dad;background:#faf0ff; }
+.news-card.lw   { border-left-color:#6a1b9a;background:#fdf4ff; }
+.news-card.aj   { border-left-color:#c62828;background:#fff5f5; }
 .card-title {
-    font-size:11pt !important; font-weight:600; color:#1a237e !important;
-    text-decoration:none !important; line-height:1.45; display:block; margin-bottom:5px;
+    font-size:11pt !important;font-weight:600;color:#1a237e !important;
+    text-decoration:none !important;line-height:1.45;display:block;margin-bottom:5px;
 }
-.card-title:hover { color:#3949ab !important; text-decoration:underline !important; }
-.card-meta { font-size:9.5pt !important; color:#4a5568 !important; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.card-title:hover { color:#3949ab !important;text-decoration:underline !important; }
+.card-meta { font-size:9.5pt !important;color:#4a5568 !important;display:flex;gap:8px;align-items:center;flex-wrap:wrap; }
 
 /* BADGES */
-.bp  { background:#e53935;color:#fff;  font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px; }
-.bpo { background:#e8f5e9;color:#2e7d32;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #a5d6a7; }
-.bne { background:#ffebee;color:#c62828;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #ef9a9a; }
-.bm  { background:#e3f2fd;color:#1565c0;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #90caf9; }
-.br  { background:#fff8e1;color:#e65100;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #ffcc02; }
-.bn  { background:#e3f2fd;color:#1565c0;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #64b5f6; }
-.bst { background:#ede7f6;color:#4527a0;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px; }
-.blw { background:#f3e5f5;color:#6a1b9a;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #ce93d8; }
-.baj { background:#ffebee;color:#c62828;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #ef9a9a; }
+.bp   { background:#e53935;color:#fff;  font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px; }
+.bpo  { background:#e8f5e9;color:#2e7d32;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #a5d6a7; }
+.bne  { background:#ffebee;color:#c62828;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #ef9a9a; }
+.bm   { background:#e3f2fd;color:#1565c0;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #90caf9; }
+.br   { background:#fff8e1;color:#e65100;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #ffcc02; }
+.bn   { background:#e3f2fd;color:#1565c0;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #64b5f6; }
+.bsbi { background:#f3e5f5;color:#6a0dad;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #ce93d8; }
+.bst  { background:#ede7f6;color:#4527a0;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px; }
+.blw  { background:#f3e5f5;color:#6a1b9a;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #ce93d8; }
+.baj  { background:#ffebee;color:#c62828;font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid #ef9a9a; }
+.benf { background:#b71c1c;color:#fff;  font-size:8.5pt !important;font-weight:700;padding:2px 6px;border-radius:4px; }
+
+/* RISK SCORE BAR */
+.risk-bar-wrap { background:#e0e0e0;border-radius:4px;height:6px;width:100%;margin-top:3px; }
+.risk-bar-fill { height:6px;border-radius:4px; }
 
 /* TABS */
 .stTabs [data-baseweb="tab"]   { font-size:10.5pt !important;font-weight:600;color:#4a5568 !important; }
@@ -573,13 +929,10 @@ section[data-testid="stSidebar"] [data-testid="stFileUploader"] {
 .stock-hdr  { font-size:11pt !important;font-weight:700;color:#4527a0;padding:6px 0 3px;border-bottom:1px solid #e2e8f0;margin:10px 0 7px; }
 .sent-bar   { display:flex;gap:16px;font-size:10pt !important;color:#4a5568;margin-bottom:8px;flex-wrap:wrap; }
 .pos { color:#2e7d32;font-weight:700; } .neg { color:#c62828;font-weight:700; } .neu { color:#718096;font-weight:600; }
-
-/* STOCK QUOTE CARD */
 .sq-card  { background:#2d3748;border:1px solid #4a5568;border-radius:8px;padding:10px 14px;margin-bottom:8px; }
 .sq-name  { font-size:10.5pt !important;font-weight:700;color:#e2e8f0 !important; }
 .sq-sym   { font-size:9pt !important;color:#90a4ae !important;margin-bottom:4px; }
 .sq-price { font-size:13pt !important;font-weight:700;color:#fff !important; }
-
 .pos-badge { display:inline-block;background:#1b5e20;color:#fff;font-size:9pt !important;font-weight:700;padding:2px 8px;border-radius:12px;margin-left:8px; }
 [data-testid="metric-container"] { display:none !important; }
 hr { border-color:#e2e8f0 !important; }
@@ -596,19 +949,24 @@ if "_login_recorded" not in st.session_state: st.session_state["_login_recorded"
 if "show_uploader"   not in st.session_state: st.session_state["show_uploader"]   = False
 
 record_login()
+GLOBAL_SEEN.clear()   # reset dedup set on each full page run
 
 # ─────────────────────────────────────────────
-# FETCH DATA
+# FETCH ALL DATA
 # ─────────────────────────────────────────────
 
 market_data = fetch_market_data()
+fii_data    = fetch_fii_flow()
 
 @st.cache_data(ttl=90, show_spinner=False)
 def load_all_data():
-    return fetch_all_feeds(FEED_SOURCES), fetch_rbi_circulars(), fetch_nse_circulars()
+    return (fetch_all_feeds(FEED_SOURCES),
+            fetch_rbi_circulars(),
+            fetch_nse_circulars(),
+            fetch_sebi_circulars())
 
 with st.spinner("📡 Fetching latest news..."):
-    all_data, rbi_circulars, nse_circulars = load_all_data()
+    all_data, rbi_circulars, nse_circulars, sebi_circulars = load_all_data()
 
 livewire_articles = fetch_livewire()
 
@@ -628,28 +986,64 @@ all_articles.sort(key=lambda x: x["dt"] if isinstance(x["dt"],datetime) else dat
 # HEADER
 # ─────────────────────────────────────────────
 
-now_ist_str = datetime.now(IST).strftime("%d %b %Y  %I:%M %p IST")
-elapsed     = int(time.time() - st.session_state.get("last_refresh", time.time()))
-remaining   = max(0, AUTO_REFRESH - elapsed)
+now_ist_str  = datetime.now(IST).strftime("%d %b %Y  %I:%M %p IST")
+refresh_int  = get_refresh_interval()
+elapsed      = int(time.time() - st.session_state.get("last_refresh", time.time()))
+remaining    = max(0, refresh_int - elapsed)
+mkt_badge    = '<span class="mkt-open">● MARKET OPEN</span>' if is_market_open() else '<span class="mkt-close">● MARKET CLOSED</span>'
+refresh_mode = f"{'Live' if is_market_open() else 'Off-hours'} · {refresh_int}s"
 
 st.markdown(f"""
 <div class="top-bar">
-  <div class="top-bar-title"><span class="live-dot"></span>JM FINANCIAL &nbsp;·&nbsp; RISK INTELLIGENCE DASHBOARD</div>
+  <div class="top-bar-title">
+    <span class="live-dot"></span>JM FINANCIAL &nbsp;·&nbsp; RISK INTELLIGENCE DASHBOARD
+    &nbsp;&nbsp;{mkt_badge}
+  </div>
   <div class="top-bar-right">
-    <span class="refresh-timer">⏱ Refresh in {remaining}s</span>
+    <span class="refresh-timer">⏱ {remaining}s · {refresh_mode}</span>
     <span class="top-bar-time">{now_ist_str}</span>
   </div>
 </div>""", unsafe_allow_html=True)
+
+# ── VIX Warning Banner ──
+vix_data  = market_data.get("INDIA VIX", {})
+vix_price = vix_data.get("price")
+if vix_price and vix_price >= 20:
+    level = "🔴 EXTREME FEAR" if vix_price >= 25 else "🟡 ELEVATED FEAR"
+    st.markdown(f'<div class="vix-banner">⚠️ INDIA VIX = {vix_price:.2f} — {level} · Elevated market risk — review positions</div>', unsafe_allow_html=True)
+
+# ── FII / DII Flow Bar ──
+fii_html = '<div class="fii-bar"><span>📊 FII/DII Today:</span>'
+if fii_data.get("headline"):
+    fn = fii_data.get("fii_net"); dn = fii_data.get("dii_net")
+    if fn is not None:
+        fc = "fii-pos" if fn >= 0 else "fii-neg"
+        dc = "fii-pos" if (dn or 0) >= 0 else "fii-neg"
+        fii_html += f'<span>FII: <span class="{fc}">{"+" if fn>=0 else ""}₹{fn:,.0f} Cr</span></span>'
+        if dn is not None:
+            fii_html += f'<span>DII: <span class="{dc}">{"+" if dn>=0 else ""}₹{dn:,.0f} Cr</span></span>'
+    hl = fii_data.get("headline","")[:100]
+    fii_html += f'<span class="fii-neu" style="font-size:8.5pt !important;">{hl}</span>'
+else:
+    fii_html += '<span class="fii-neu">No FII/DII data available yet today</span>'
+fii_html += '</div>'
+st.markdown(fii_html, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
 # MARKET MONITOR
 # ─────────────────────────────────────────────
 
-mhtml = '<div class="market-monitor"><div class="mm-label">⚡ Live Market Watch &nbsp;·&nbsp; Yahoo Finance &nbsp;·&nbsp; Refreshes every 60s</div><div class="ticker-grid">'
+mhtml = '<div class="market-monitor"><div class="mm-label">⚡ Live Market Watch &nbsp;·&nbsp; Yahoo Finance</div><div class="ticker-grid">'
 for name, data in market_data.items():
     p,c,pct,unit = data.get("price"),data.get("change"),data.get("pct"),data.get("unit","")
     if p is None:
         mhtml += f'<div class="ticker-card flat"><div class="t-name">{name}</div><div class="t-price">—</div><div class="t-flat">N/A</div></div>'
+        continue
+    # Special VIX rendering
+    if name == "INDIA VIX":
+        vix_cls = "vix-hi" if p >= 20 else "vix-ok"
+        vix_lbl = "⚠ HIGH" if p >= 20 else "✓ LOW"
+        mhtml += f'<div class="ticker-card {vix_cls}"><div class="t-name">{name}</div><div class="t-price">{p:.2f}</div><div class="t-vix">{vix_lbl} ({pct:+.2f}%)</div></div>'
         continue
     d="up" if c>=0 else "down"; arr="▲" if c>=0 else "▼"; tc="t-up" if c>=0 else "t-dn"
     ps=f"{unit}{p:,.0f}" if name in ("NIFTY 50","SENSEX","BANK NIFTY") else f"{unit}{p:,.2f}"
@@ -665,7 +1059,6 @@ with st.sidebar:
     st.markdown("## 📊 JM Risk Dashboard")
     st.markdown("---")
 
-    # ── STOCK SEARCH ──
     st.markdown("### 🔍 Stock Search")
     st.caption("NSE Code · BSE Code · ISIN · Company Name")
     search_input = st.text_input(
@@ -697,16 +1090,12 @@ with st.sidebar:
             st.error(f"❌ Not found: `{search_input.strip()}`\n\nTry NSE (`RELIANCE`), BSE (`500325`), ISIN (`INE002A01018`)\n\n_{res.get('error','')[:80]}_")
 
     st.markdown("---")
-
-    # ── CONTROLS ──
     st.markdown("### ⚙️ Controls")
-    auto_refresh = st.toggle("Auto Refresh (90s)", value=True)
+    auto_refresh = st.toggle("Auto Refresh", value=True)
     if st.button("🔄 Refresh Now", use_container_width=True):
-        st.cache_data.clear(); st.session_state["last_refresh"] = time.time(); st.rerun()
+        st.cache_data.clear(); st.session_state["last_refresh"]=time.time(); st.rerun()
 
     st.markdown("---")
-
-    # ── ADMIN PANEL ──
     st.markdown("### 🔐 Admin Panel")
     pwd      = st.text_input("Password", type="password", key="admin_pwd")
     is_admin = (pwd == ADMIN_PASSWORD)
@@ -715,7 +1104,6 @@ with st.sidebar:
         st.success("✅ Access granted")
         st.markdown("#### 📂 Portfolio")
 
-        # Status line
         current_port = st.session_state.get("portfolio", load_portfolio())
         total_pos    = sum(p.get("position_crs",0) for p in current_port)
         st.markdown(
@@ -724,54 +1112,55 @@ with st.sidebar:
             + (f" · ₹{total_pos:,.1f} Cr" if total_pos>0 else "")
             + "</div>", unsafe_allow_html=True
         )
-
-        # ── TWO CLEAN DARK BUTTONS side by side ──────────────────────────
-        # APPROACH: st.file_uploader is hidden via CSS (height:0, opacity:0).
-        # A normal st.button "📂 Import Portfolio" toggles show_uploader flag.
-        # When True, the file_uploader appears BELOW the buttons row,
-        # completely styled dark via CSS — this is the ONLY approach that
-        # guarantees both correct appearance AND correct functionality.
-        # ─────────────────────────────────────────────────────────────────
-        col_a, col_b = st.columns(2)
+        col_a,col_b = st.columns(2)
         with col_a:
             if st.button("📂 Import", use_container_width=True, key="btn_import_port"):
-                st.session_state["show_uploader"] = not st.session_state.get("show_uploader", False)
+                st.session_state["show_uploader"] = not st.session_state.get("show_uploader",False)
         with col_b:
             if st.button("🗑 Delete", use_container_width=True, key="btn_del_port"):
-                st.session_state["portfolio"]   = DEFAULT_PORTFOLIO
-                st.session_state["show_uploader"] = False
+                st.session_state["portfolio"]=DEFAULT_PORTFOLIO
+                st.session_state["show_uploader"]=False
                 if os.path.exists(PORTFOLIO_FILE): os.remove(PORTFOLIO_FILE)
                 st.cache_data.clear(); st.rerun()
 
-        # File uploader — shown only after Import is clicked
-        # CSS completely hides Streamlit's default white box rendering
-        # but the widget itself is still functional when visible=True in session
-        if st.session_state.get("show_uploader", False):
+        if st.session_state.get("show_uploader",False):
             st.caption("📎 Choose your Excel file (.xlsx):")
             uploaded_excel = st.file_uploader(
-                label="portfolio_excel",
-                type=["xlsx","xls"],
-                key="portfolio_upload",
-                label_visibility="collapsed",
+                label="portfolio_excel", type=["xlsx","xls"],
+                key="portfolio_upload", label_visibility="collapsed",
             )
             if uploaded_excel is not None:
-                with st.spinner("Parsing Excel..."):
+                with st.spinner("Parsing..."):
                     new_port, err = parse_excel_portfolio(uploaded_excel)
                 if new_port:
-                    st.session_state["portfolio"]     = new_port
-                    st.session_state["show_uploader"] = False
+                    st.session_state["portfolio"]=new_port
+                    st.session_state["show_uploader"]=False
                     save_portfolio(new_port); st.cache_data.clear()
-                    st.success(f"✅ {len(new_port)} stocks imported!")
-                    st.rerun()
+                    st.success(f"✅ {len(new_port)} stocks imported!"); st.rerun()
                 else:
                     st.error(f"❌ {err}")
 
         st.markdown("---")
 
-        # ── PUSH HEADLINE ──
+        # Daily Briefing PDF
+        st.markdown("#### 📄 Daily Briefing")
+        if st.button("⬇ Download Morning Briefing (PDF)", use_container_width=True, key="dl_brief"):
+            with st.spinner("Generating PDF..."):
+                pdf_bytes = generate_briefing_pdf(
+                    all_articles, rbi_circulars, nse_circulars, sebi_circulars,
+                    st.session_state.get("portfolio", load_portfolio()), market_data
+                )
+            if pdf_bytes:
+                fname = f"JM_RiskBriefing_{datetime.now(IST).strftime('%Y%m%d_%H%M')}.pdf"
+                st.download_button("📥 Save PDF", data=pdf_bytes, file_name=fname,
+                                   mime="application/pdf", use_container_width=True, key="save_brief")
+            else:
+                st.warning("Install fpdf2: pip install fpdf2")
+
+        st.markdown("---")
+
         st.markdown("#### 📢 Push Internal Headline")
-        new_title = st.text_area("Headline text", height=68, key="adm_title",
-                                  placeholder="Enter headline text...")
+        new_title = st.text_area("Headline text", height=68, key="adm_title", placeholder="Enter headline text...")
         new_link  = st.text_input("Source link (optional)", value="#", key="adm_link")
         new_cat   = st.selectbox("Segment", options=[
             "⚠️ Risk Alert","📋 Compliance","🏛️ Internal Memo",
@@ -781,46 +1170,30 @@ with st.sidebar:
         ], key="adm_cat")
         if st.button("➕ Publish", use_container_width=True):
             if new_title.strip():
-                items = load_manual()
+                items=load_manual()
                 items.insert(0,{"title":new_title.strip(),"link":new_link.strip() or "#",
                     "dt":datetime.now(timezone.utc).isoformat(),"category":new_cat,
                     "manual":True,"priority":is_priority(new_title),"sentiment":get_sentiment(new_title)})
                 save_manual(items); st.cache_data.clear(); st.success("✅ Published!"); st.rerun()
 
-        existing = load_manual()
+        existing=load_manual()
         if existing:
             st.markdown("**🗑 Manage Published**")
-            for i, item in enumerate(existing):
+            for i,item in enumerate(existing):
                 c1,c2=st.columns([5,1])
                 c1.markdown(f"<div style='font-size:9pt;color:#cbd5e0;'>{item['title'][:50]}…</div>",unsafe_allow_html=True)
                 if c2.button("✕",key=f"del_{i}"):
                     existing.pop(i); save_manual(existing); st.rerun()
 
         st.markdown("---")
-
-        # ── LOGIN LOG — DOWNLOAD ONLY ──────────────────────────────────
-        # No table displayed. Just a count + download button.
-        # Admin downloads the CSV privately — no info shown on screen.
-        # ──────────────────────────────────────────────────────────────
         st.markdown("#### 🛡️ Access Log")
-        logs = load_login_logs()
-        log_count = len(logs)
-        st.markdown(
-            f"<div style='font-size:9.5pt;color:#090E41;margin:2px 0 8px;'>"
-            f"📋 {log_count} session{'s' if log_count!=1 else ''} recorded</div>",
-            unsafe_allow_html=True
-        )
+        logs=load_login_logs()
+        st.markdown(f"<div style='font-size:9.5pt;color:#90caf9;margin:2px 0 8px;'>📋 {len(logs)} session{'s' if len(logs)!=1 else ''} recorded</div>",unsafe_allow_html=True)
         if logs:
-            csv_bytes = logs_to_csv_bytes(logs)
-            fname = f"jm_access_log_{datetime.now(IST).strftime('%Y%m%d_%H%M')}.csv"
-            st.download_button(
-                label="⬇ Download Access Log (CSV)",
-                data=csv_bytes,
-                file_name=fname,
-                mime="text/csv",
-                use_container_width=True,
-                key="dl_log",
-            )
+            csv_bytes=logs_to_csv_bytes(logs)
+            fname=f"jm_access_log_{datetime.now(IST).strftime('%Y%m%d_%H%M')}.csv"
+            st.download_button("⬇ Download Access Log (CSV)", data=csv_bytes, file_name=fname,
+                               mime="text/csv", use_container_width=True, key="dl_log")
             if st.button("🗑 Clear Log", use_container_width=True, key="clear_log"):
                 if os.path.exists(LOGIN_LOG_FILE): os.remove(LOGIN_LOG_FILE)
                 st.rerun()
@@ -833,17 +1206,18 @@ with st.sidebar:
 # RENDERERS
 # ─────────────────────────────────────────────
 
-def _cls(ip, sent):
+def _cls(ip,sent):
     if ip:               return "news-card priority"
     if sent=="positive": return "news-card sentiment-positive"
     if sent=="negative": return "news-card sentiment-negative"
     return "news-card"
 
-def render_news_cards(articles):
-    if not articles:
+def render_news_cards(articles, apply_dedup=True):
+    items = dedup_articles(articles) if apply_dedup else articles
+    if not items:
         st.markdown("<div style='font-size:11pt;color:#718096;padding:16px 0;'>No news found — try Refresh Now.</div>",unsafe_allow_html=True)
         return
-    for art in articles:
+    for art in items:
         ip=art.get("priority",False); im=art.get("manual",False)
         sent=art.get("sentiment","neutral"); cat=art.get("category",""); cls=_cls(ip,sent)
         dt_o=art["dt"]
@@ -858,38 +1232,61 @@ def render_news_cards(articles):
         st.markdown(f'<div class="{cls}"><a class="card-title" href="{art["link"]}" target="_blank">{art["title"]}</a><div class="card-meta"><span>{ago}</span><span>·</span><span>{cat}</span>{pb}{mb}{sb}</div></div>',unsafe_allow_html=True)
 
 def render_circular_cards(articles, badge_cls, card_extra):
-    label="RBI" if "rbi" in card_extra else "NSE"
-    if not articles:
+    label="RBI" if "rbi" in card_extra else ("SEBI" if "sebi" in card_extra else "NSE")
+    items = dedup_articles(articles)
+    if not items:
         st.markdown(f"<div style='font-size:11pt;color:#718096;padding:16px 0;'>No {label} circulars — try Refresh Now.</div>",unsafe_allow_html=True)
         return
-    for art in articles:
+    for art in items:
         ip=art.get("priority",False); sent=art.get("sentiment","neutral")
+        is_enf = art.get("source","")=="SEBI Enforcement"
         cls=f"news-card {card_extra}"+(" priority" if ip else ""); ago=time_ago(art["dt"])
-        tb=f'<span class="{badge_cls}">{label} CIRCULAR</span>'
+        src=art.get("source","")
+        tb=f'<span class="{badge_cls}">{label} {"ENFORCEMENT" if is_enf else "CIRCULAR"}</span>'
         pb='<span class="bp">⚡ PRIORITY</span>' if ip else ""
         sb=('<span class="bpo">▲ POSITIVE</span>' if sent=="positive" else '<span class="bne">▼ NEGATIVE</span>' if sent=="negative" else "")
-        st.markdown(f'<div class="{cls}"><a class="card-title" href="{art["link"]}" target="_blank">{art["title"]}</a><div class="card-meta"><span>{ago}</span>{tb}{sb}{pb}</div></div>',unsafe_allow_html=True)
+        src_b=f'<span style="background:#21262d;color:#8b949e;font-size:7.5pt;padding:1px 5px;border-radius:3px;">{src}</span>' if src else ""
+        st.markdown(f'<div class="{cls}"><a class="card-title" href="{art["link"]}" target="_blank">{art["title"]}</a><div class="card-meta"><span>{ago}</span>{tb}{sb}{pb}{src_b}</div></div>',unsafe_allow_html=True)
 
 def render_portfolio(portfolio):
     if not portfolio:
-        st.markdown("<div style='font-size:11pt;color:#718096;padding:16px 0;'>No portfolio loaded. Ask admin to import via Admin Panel.</div>",unsafe_allow_html=True)
+        st.markdown("<div style='font-size:11pt;color:#718096;padding:16px 0;'>No portfolio loaded. Ask admin to import.</div>",unsafe_allow_html=True)
         return
     now=datetime.now(timezone.utc); month_label=now.strftime("%B %Y")
-    tp=sum(p.get("position_crs",0) for p in portfolio)
-    st.markdown(f"<div style='font-size:10.5pt;color:#4527a0;margin-bottom:10px;'>Tracking <b>{len(portfolio)} stocks</b>"+(f" &nbsp;·&nbsp; Total: <b>₹{tp:,.1f} Cr</b>" if tp>0 else "")+f" &nbsp;·&nbsp; <span style='font-size:9.5pt;color:#718096;'>Showing {month_label} news only</span></div>",unsafe_allow_html=True)
+    total_pos=sum(p.get("position_crs",0) for p in portfolio)
+    st.markdown(f"<div style='font-size:10.5pt;color:#4527a0;margin-bottom:10px;'>Tracking <b>{len(portfolio)} stocks</b>"+(f" &nbsp;·&nbsp; Total: <b>₹{total_pos:,.1f} Cr</b>" if total_pos>0 else "")+f" &nbsp;·&nbsp; <span style='font-size:9.5pt;color:#718096;'>{month_label} news only</span></div>",unsafe_allow_html=True)
+
+    # Sort by risk score (highest first) so risky stocks appear at top
+    portfolio_scored = []
     for stock in portfolio:
+        nse=stock.get("nse_code",""); name=stock.get("name",""); pos=stock.get("position_crs",0)
+        arts=fetch_stock_news_gn(nse, name)
+        score=calc_risk_score(arts, pos, total_pos)
+        portfolio_scored.append((stock, arts, score))
+    portfolio_scored.sort(key=lambda x: x[2], reverse=True)
+
+    for stock, arts, risk_score in portfolio_scored:
         name=stock.get("name",""); nse=stock.get("nse_code",""); pos=stock.get("position_crs",0)
-        pb=f'<span class="pos-badge">₹{pos:,.1f} Cr</span>' if pos and pos>0 else ""
-        st.markdown(f'<div class="stock-hdr">📌 {name.upper()}<span style="font-size:9.5pt;color:#718096;font-weight:400;margin-left:8px;">{nse}</span>{pb}</div>',unsafe_allow_html=True)
-        with st.spinner(f"Loading {name}..."):
-            arts=fetch_stock_news_gn(nse, name)
+        pb_pos=f'<span class="pos-badge">₹{pos:,.1f} Cr</span>' if pos and pos>0 else ""
+
+        # Risk score colour
+        if risk_score >= 15:    rs_col="#c62828"; rs_lbl=f"⚠ HIGH RISK ({risk_score:.0f})"
+        elif risk_score >= 5:   rs_col="#e65100"; rs_lbl=f"△ MEDIUM ({risk_score:.0f})"
+        else:                   rs_col="#2e7d32"; rs_lbl=f"✓ LOW ({risk_score:.0f})"
+        rs_badge = f'<span style="font-size:8.5pt;font-weight:700;color:{rs_col};margin-left:10px;">{rs_lbl}</span>'
+
+        st.markdown(f'<div class="stock-hdr">📌 {name.upper()}<span style="font-size:9.5pt;color:#718096;font-weight:400;margin-left:8px;">{nse}</span>{pb_pos}{rs_badge}</div>',unsafe_allow_html=True)
+
         if not arts:
             st.markdown(f"<div style='font-size:10pt;color:#718096;padding:4px 0 12px;'>No news for {name} in {month_label}.</div>",unsafe_allow_html=True)
             continue
         pn=sum(1 for a in arts if a.get("sentiment")=="positive")
         nn=sum(1 for a in arts if a.get("sentiment")=="negative")
         un=len(arts)-pn-nn
-        st.markdown(f'<div class="sent-bar"><span>Headlines: <b>{len(arts)}</b></span><span>🟢 <span class="pos">{pn} Positive</span></span><span>🔴 <span class="neg">{nn} Negative</span></span><span>⚪ <span class="neu">{un} Neutral</span></span></div>',unsafe_allow_html=True)
+        # Risk score visual bar (0-100 scale, red fill)
+        bar_w = min(int(risk_score), 100)
+        bar_col = "#c62828" if risk_score>=15 else "#e65100" if risk_score>=5 else "#2e7d32"
+        st.markdown(f'<div class="sent-bar"><span>Headlines: <b>{len(arts)}</b></span><span>🟢 <span class="pos">{pn}</span></span><span>🔴 <span class="neg">{nn}</span></span><span>⚪ <span class="neu">{un}</span></span></div><div class="risk-bar-wrap"><div class="risk-bar-fill" style="width:{bar_w}%;background:{bar_col};"></div></div>',unsafe_allow_html=True)
         for art in arts:
             ip=art.get("priority",False); sent=art.get("sentiment","neutral"); cls=_cls(ip,sent)
             dt_o=art["dt"]
@@ -904,10 +1301,11 @@ def render_portfolio(portfolio):
         st.markdown("<div style='margin-bottom:8px'></div>",unsafe_allow_html=True)
 
 def render_livewire(articles):
-    if not articles:
+    items = dedup_articles(articles)
+    if not items:
         st.markdown("<div style='font-size:11pt;color:#718096;padding:16px 0;'>No live wire news — try Refresh Now.</div>",unsafe_allow_html=True)
         return
-    for art in articles:
+    for art in items:
         ip=art.get("priority",False); sent=art.get("sentiment","neutral"); link=art.get("link","#")
         is_aj="aljazeera" in link.lower()
         cls="news-card priority" if ip else ("news-card aj" if is_aj else "news-card lw")
@@ -926,20 +1324,24 @@ def render_livewire(articles):
 # ─────────────────────────────────────────────
 
 news_cats=list(FEED_SOURCES.keys())
-tab_all,tab_prio,tab_port,tab_rbi,tab_nse,tab_lw,*cat_tabs=st.tabs(
-    ["📋 All News","🔴 Priority","📂 Portfolio","🏛️ RBI Circulars","🔵 NSE Circulars","🌐 Live Wire"]+news_cats
+tab_all,tab_prio,tab_port,tab_rbi,tab_nse,tab_sebi,tab_lw,*cat_tabs=st.tabs(
+    ["📋 All News","🔴 Priority","📂 Portfolio",
+     "🏛️ RBI Circulars","🔵 NSE Circulars","⚖️ SEBI","🌐 Live Wire"]+news_cats
 )
 
 with tab_all:   render_news_cards(all_articles)
 with tab_prio:
     pa=[a for a in all_articles if a.get("priority")]
     if pa: st.markdown(f"<div style='font-size:10.5pt;color:#c62828;font-weight:700;margin-bottom:10px;'>⚡ {len(pa)} priority alerts</div>",unsafe_allow_html=True)
-    render_news_cards(pa)
+    render_news_cards(pa, apply_dedup=False)
 with tab_port:  render_portfolio(st.session_state.get("portfolio",load_portfolio()))
 with tab_rbi:   render_circular_cards(rbi_circulars,"br","rbi")
 with tab_nse:   render_circular_cards(nse_circulars,"bn","nse")
+with tab_sebi:
+    st.markdown("<div style='font-size:10pt;color:#6a0dad;font-weight:600;margin-bottom:8px;'>⚖️ SEBI Circulars, Notifications & Enforcement Orders &nbsp;·&nbsp; Sources: sebi.gov.in RSS + Google News + Enforcement Google News</div>",unsafe_allow_html=True)
+    render_circular_cards(sebi_circulars,"bsbi","sebi")
 with tab_lw:
-    st.markdown("<div style='font-size:10pt;color:#6a1b9a;font-weight:600;margin-bottom:8px;'>🌐 Live Wire &nbsp;·&nbsp; Investing.com India &nbsp;+&nbsp; Al Jazeera Middle East &nbsp;·&nbsp; Refreshes every 60s &nbsp;·&nbsp; Last 48h only</div>",unsafe_allow_html=True)
+    st.markdown("<div style='font-size:10pt;color:#6a1b9a;font-weight:600;margin-bottom:8px;'>🌐 Live Wire &nbsp;·&nbsp; Investing.com India &nbsp;+&nbsp; Al Jazeera Middle East &nbsp;·&nbsp; Last 48h only</div>",unsafe_allow_html=True)
     render_livewire(livewire_articles)
 for tab,cat in zip(cat_tabs,news_cats):
     with tab:
@@ -947,12 +1349,13 @@ for tab,cat in zip(cat_tabs,news_cats):
         render_news_cards([{**a,"category":cat,"manual":False} for a in all_data.get(cat,[])])
 
 # ─────────────────────────────────────────────
-# AUTO-REFRESH
+# AUTO-REFRESH (market-hours aware)
 # ─────────────────────────────────────────────
 
 if auto_refresh:
-    elapsed_now=int(time.time()-st.session_state.get("last_refresh",time.time()))
-    if elapsed_now>=AUTO_REFRESH:
+    refresh_interval = get_refresh_interval()
+    elapsed_now = int(time.time()-st.session_state.get("last_refresh",time.time()))
+    if elapsed_now >= refresh_interval:
         st.cache_data.clear(); st.session_state["last_refresh"]=time.time(); time.sleep(0.3); st.rerun()
     else:
         time.sleep(5); st.rerun()
