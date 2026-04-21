@@ -1,17 +1,16 @@
 """
-JM Financial | Risk Intelligence Dashboard  v13.0
+JM Financial | Risk Intelligence Dashboard  v14.0
 ==================================================
-KEY CHANGES FROM v12:
-✅ nselib used for stock quote prices (fetch_stock_quote)
-✅ nselib used for FII/DII data (capital_market.fii_dii_trade_react)
-✅ nselib used for NSE Circulars (capital_market.exchange_circulars)
-✅ yfinance kept ONLY for live market monitor tickers (NIFTY/SENSEX/VIX/commodities)
-✅ Investing.com feeds removed from Live Wire (irrelevant international news)
-✅ Live Wire now: Al Jazeera RSS + Google News India/geopolitical only
-✅ RBI Circulars: RSS only (no ASPX, no Google News) — clean and reliable
-✅ Deduplication fixed: ALL tabs use local dedup — no cross-tab interference
-✅ Live Wire articles merged into All News tab correctly
-✅ Live dot animation slowed to 4s
+KEY CHANGES FROM v13:
+✅ FII/DII completely rewritten with 5-layer fallback strategy
+   Layer 1: nselib — tries ALL known function names + column variants
+   Layer 2: NSE /api/fiidiiTradeReact with proper 2-step cookie session
+   Layer 3: NSE /api/FII-Stats (alternate endpoint)
+   Layer 4: Moneycontrol RSS + ET Markets RSS (carry FII/DII figures in titles)
+   Layer 5: Google News fallback with regex number extraction
+✅ FII/DII cache TTL reduced to 900s (30 min) for fresher provisional data
+✅ FII/DII source label shown in UI so you know which layer provided data
+✅ All other functionality unchanged from v13
 
 Install:
   pip install streamlit feedparser requests urllib3 beautifulsoup4 lxml
@@ -289,15 +288,7 @@ ISIN_TO_NSE = {
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_stock_quote(raw: str) -> dict:
-    """
-    Primary: nselib equity.equity_history() for NSE live price.
-    nselib hits NSE's own API — no rate limiting issues like Yahoo Finance.
-    Fallback: yfinance download (daily OHLCV, no .info call).
-    TTL=120s — fresh enough for risk monitoring without hammering APIs.
-    """
     inp = raw.strip().upper()
-
-    # Resolve to NSE symbol
     if len(inp)==12 and inp.startswith("IN") and inp[2:].isalnum():
         nse_sym = ISIN_TO_NSE.get(inp)
         if not nse_sym:
@@ -309,17 +300,9 @@ def fetch_stock_quote(raw: str) -> dict:
 
     yahoo_sym = nse_sym + ".NS"
 
-    # ── PRIMARY: nselib ──────────────────────────────────────────
     if NSELIB_OK:
         try:
             from nselib import capital_market
-            # get_quote returns a dict with lastPrice, change, pChange, companyName
-            quote = capital_market.market_watch_all_indices()  # not right — use below
-        except: pass
-
-        try:
-            from nselib import capital_market
-            # equity_history gives OHLCV for a date range — use last 2 trading days
             from datetime import date, timedelta as td
             today = date.today().strftime("%d-%m-%Y")
             week_ago = (date.today() - td(days=7)).strftime("%d-%m-%Y")
@@ -332,7 +315,6 @@ def fetch_stock_quote(raw: str) -> dict:
                 prev  = float(df["ClosePrice"].iloc[-2]) if "ClosePrice" in df.columns and len(df)>1 else price
                 c = price - prev; pct = (c/prev*100) if prev else 0.0
                 nm = nse_sym
-                # Try to get company name
                 try:
                     nm_col = [c for c in df.columns if "symbol" in c.lower() or "name" in c.lower()]
                     if nm_col: nm = str(df[nm_col[0]].iloc[-1])
@@ -340,7 +322,6 @@ def fetch_stock_quote(raw: str) -> dict:
                 return {"found":True,"name":nm,"symbol":nse_sym,"price":price,"change":c,"pct":pct,"error":None,"source":"NSE"}
         except: pass
 
-    # ── FALLBACK: yfinance download (no .info — no rate limit) ──
     def _yf_fetch(sym):
         try:
             df = yf.download(sym, period="5d", interval="1d", progress=False, auto_adjust=True)
@@ -392,11 +373,6 @@ def fetch_stock_news_gn(nse, name):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_market_data():
-    """
-    Uses yfinance 1-minute data for real intraday prices.
-    Flattens MultiIndex columns (yfinance 0.2.x issue).
-    Falls back to fast_info if download fails.
-    """
     res = {}
     for name, (sym, unit) in MARKET_TICKERS.items():
         price, prev, ok = None, None, False
@@ -428,112 +404,360 @@ def fetch_market_data():
     return res
 
 # ─────────────────────────────────────────────────────────────
-# FII / DII — nselib primary, NSE JSON API fallback, Google News last
+# FII / DII — 5-layer robust fallback strategy
 # ─────────────────────────────────────────────────────────────
+#
+# Layer 1: nselib — tries ALL known function variants + column name variants
+# Layer 2: NSE /api/fiidiiTradeReact with proper 2-step cookie session
+# Layer 3: NSE /api/FII-Stats (alternate endpoint, sometimes active)
+# Layer 4: Moneycontrol RSS + ET Markets RSS (carry figures in headlines)
+# Layer 5: Google News with regex number extraction
+#
+# TTL = 900s (15 min) — frequent enough to catch post-market 5 PM provisional data
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_fii_flow():
-    """
-    Primary: nselib capital_market.fii_dii_trade_react()
-    nselib wraps NSE's internal JSON API correctly with proper session handling.
-    Fallback 1: Direct NSE JSON API with session cookie.
-    Fallback 2: Google News headline.
-    """
-    result = {"fii_net":None,"dii_net":None,"headline":None,
-              "dt":None,"data_date":None,"source":None}
+_NSE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+}
 
-    # ── PRIMARY: nselib ──────────────────────────────────────
+
+def _make_nse_session() -> requests.Session:
+    """
+    Two-step NSE session setup:
+    1. Hit homepage to get initial cookies (nsit, nseappid)
+    2. Hit the 'reports' page Referer to get the API-access cookie
+    Returns a ready session or None on failure.
+    """
+    try:
+        s = requests.Session()
+        s.get(
+            "https://www.nseindia.com",
+            headers={**_NSE_HEADERS, "Accept": "text/html,application/xhtml+xml,*/*;q=0.9"},
+            timeout=10, verify=False
+        )
+        time.sleep(0.4)
+        s.get(
+            "https://www.nseindia.com/reports/fii-dii",
+            headers={**_NSE_HEADERS, "Accept": "text/html,*/*;q=0.9",
+                     "Referer": "https://www.nseindia.com/"},
+            timeout=10, verify=False
+        )
+        time.sleep(0.3)
+        return s
+    except:
+        return None
+
+
+def _parse_fii_row(row: dict) -> tuple:
+    """
+    Robustly extract fii_net and dii_net from an NSE API row dict.
+    NSE changes key names across versions — we try every known variant.
+    Returns (fii_net, dii_net) floats, either may be None.
+    """
+    def _v(keys):
+        for k in keys:
+            # Direct key match
+            v = row.get(k)
+            if v is not None:
+                try: return float(str(v).replace(",", "").replace(" ", ""))
+                except: pass
+            # Case-insensitive search
+            for rk, rv in row.items():
+                if k.lower() == rk.lower() and rv is not None:
+                    try: return float(str(rv).replace(",", "").replace(" ", ""))
+                    except: pass
+            # Nested cashMarket dict (some API versions)
+            if "cashMarket" in row and isinstance(row["cashMarket"], dict):
+                v = row["cashMarket"].get(k)
+                if v is not None:
+                    try: return float(str(v).replace(",", "").replace(" ", ""))
+                    except: pass
+        return None
+
+    fii_keys = [
+        "fiiNetTrade", "FII_NET_TRADE", "fii_net_trade",
+        "fiiNet", "fii_net", "FII_NET",
+        "FII", "netFII", "net_fii",
+        "fiiNetPurchaseSales", "netPurchasesSalesFII",
+    ]
+    dii_keys = [
+        "diiNetTrade", "DII_NET_TRADE", "dii_net_trade",
+        "diiNet", "dii_net", "DII_NET",
+        "DII", "netDII", "net_dii",
+        "diiNetPurchaseSales", "netPurchasesSalesDII",
+    ]
+    return _v(fii_keys), _v(dii_keys)
+
+
+def _build_result(fii_v, dii_v, date_v, source) -> dict:
+    fp = "+" if fii_v >= 0 else ""
+    dp = "+" if (dii_v or 0) >= 0 else ""
+    hl = f"FII: {fp}{fii_v:,.2f} Cr"
+    if dii_v is not None:
+        hl += f"  |  DII: {dp}{dii_v:,.2f} Cr"
+    if date_v:
+        hl += f"  (as of {date_v})"
+    return {
+        "fii_net": fii_v, "dii_net": dii_v,
+        "data_date": date_v,
+        "dt": datetime.now(timezone.utc),
+        "source": source,
+        "headline": hl,
+    }
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_fii_flow() -> dict:
+    """
+    5-layer FII/DII data fetcher. Returns dict with keys:
+    fii_net, dii_net, headline, dt, data_date, source
+    """
+    empty = {"fii_net": None, "dii_net": None, "headline": None,
+             "dt": None, "data_date": None, "source": None}
+
+    # ── LAYER 1: nselib — try every known function + column variant ──
     if NSELIB_OK:
         try:
-            from nselib import capital_market
-            df = capital_market.fii_dii_trade_react()
-            if df is not None and not df.empty:
-                row = df.iloc[0]
-                # Column names vary across nselib versions — try all
-                def _get(cols):
-                    for c in cols:
-                        for col in df.columns:
-                            if c.lower() in col.lower():
-                                try: return float(str(row[col]).replace(",",""))
-                                except: pass
-                    return None
-                date_v = str(row.get("date", row.get("Date", row.get("TRADE_DATE","")))).strip()[:12]
-                fii_v  = _get(["fiiNet","fii_net","FII_NET","fiiNetTrade","FII"])
-                dii_v  = _get(["diiNet","dii_net","DII_NET","diiNetTrade","DII"])
+            from nselib import capital_market as cm_mod
+
+            # Try function name variants across nselib versions
+            fii_funcs = [
+                "fii_dii_trade_react",
+                "fii_dii_data",
+                "fiiDiiData",
+                "get_fii_dii_data",
+                "fii_dii",
+            ]
+            for fname in fii_funcs:
+                fn = getattr(cm_mod, fname, None)
+                if fn is None:
+                    continue
+                try:
+                    df = fn()
+                    if df is None or (hasattr(df, "empty") and df.empty):
+                        continue
+
+                    # Convert to list of dicts for uniform handling
+                    if hasattr(df, "to_dict"):
+                        rows = df.to_dict(orient="records")
+                    elif isinstance(df, list):
+                        rows = df
+                    else:
+                        continue
+
+                    if not rows:
+                        continue
+
+                    row = rows[0]  # Most recent date is first row
+
+                    # Extract date
+                    date_v = ""
+                    for dk in ["date", "Date", "TRADE_DATE", "tradeDate", "trade_date"]:
+                        v = row.get(dk)
+                        if not v:
+                            # Case-insensitive
+                            for k in row:
+                                if k.lower() == dk.lower():
+                                    v = row[k]; break
+                        if v:
+                            date_v = str(v).strip()[:12]; break
+
+                    fii_v, dii_v = _parse_fii_row(row)
+
+                    if fii_v is not None:
+                        return _build_result(fii_v, dii_v, date_v, f"NSE via nselib.{fname}")
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # ── LAYER 2: NSE /api/fiidiiTradeReact with proper session ──
+    try:
+        s = _make_nse_session()
+        if s:
+            resp = s.get(
+                "https://www.nseindia.com/api/fiidiiTradeReact",
+                headers={
+                    **_NSE_HEADERS,
+                    "Accept": "application/json",
+                    "Referer": "https://www.nseindia.com/reports/fii-dii",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                timeout=15, verify=False
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                # API returns a list; first element = most recent
+                if isinstance(data, list) and data:
+                    row = data[0]
+                    date_v = str(
+                        row.get("date") or row.get("Date") or
+                        row.get("TRADE_DATE") or row.get("tradeDate") or ""
+                    ).strip()[:12]
+                    fii_v, dii_v = _parse_fii_row(row)
+                    if fii_v is not None:
+                        return _build_result(fii_v, dii_v, date_v, "NSE API /fiidiiTradeReact")
+                # Some versions return a dict with a data key
+                elif isinstance(data, dict):
+                    for dk in ["data", "Data", "fiidii", "result"]:
+                        inner = data.get(dk)
+                        if isinstance(inner, list) and inner:
+                            row = inner[0]
+                            fii_v, dii_v = _parse_fii_row(row)
+                            if fii_v is not None:
+                                date_v = str(row.get("date", "")).strip()[:12]
+                                return _build_result(fii_v, dii_v, date_v, "NSE API /fiidiiTradeReact")
+    except Exception:
+        pass
+
+    # ── LAYER 3: NSE /api/FII-Stats (alternate endpoint) ──
+    try:
+        s2 = _make_nse_session()
+        if s2:
+            for endpoint in [
+                "https://www.nseindia.com/api/FII-Stats",
+                "https://www.nseindia.com/api/fii-stats",
+                "https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O",
+            ]:
+                try:
+                    r = s2.get(
+                        endpoint,
+                        headers={
+                            **_NSE_HEADERS,
+                            "Accept": "application/json",
+                            "Referer": "https://www.nseindia.com/reports/fii-dii",
+                        },
+                        timeout=12, verify=False
+                    )
+                    if r.status_code != 200:
+                        continue
+                    d = r.json()
+                    rows = d if isinstance(d, list) else d.get("data", [])
+                    if rows:
+                        row = rows[0]
+                        fii_v, dii_v = _parse_fii_row(row)
+                        if fii_v is not None:
+                            date_v = str(row.get("date", row.get("Date", ""))).strip()[:12]
+                            return _build_result(fii_v, dii_v, date_v, f"NSE API {endpoint.split('/')[-1]}")
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    # ── LAYER 4: Moneycontrol + ET Markets RSS with regex extraction ──
+    rss_sources = [
+        ("https://www.moneycontrol.com/rss/results.xml",           "Moneycontrol RSS"),
+        ("https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms", "ET Markets RSS"),
+        ("https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",     "ET RSS"),
+    ]
+    # Regex to capture patterns like "FII: +1234.56 Cr" or "FII net +1,234 crore"
+    fii_re = re.compile(
+        r'FII[:/\s]+([+\-]?\s*[\d,]+(?:\.\d+)?)\s*(?:Cr|crore)',
+        re.IGNORECASE
+    )
+    dii_re = re.compile(
+        r'DII[:/\s]+([+\-]?\s*[\d,]+(?:\.\d+)?)\s*(?:Cr|crore)',
+        re.IGNORECASE
+    )
+
+    def _extract_fii_dii_from_text(text: str):
+        fm = fii_re.search(text)
+        dm = dii_re.search(text)
+        fv = dv = None
+        if fm:
+            try: fv = float(fm.group(1).replace(",", "").replace(" ", ""))
+            except: pass
+        if dm:
+            try: dv = float(dm.group(1).replace(",", "").replace(" ", ""))
+            except: pass
+        return fv, dv
+
+    for rss_url, src_name in rss_sources:
+        try:
+            resp = requests.get(rss_url, headers=_NSE_HEADERS, timeout=10, verify=False)
+            feed = feedparser.parse(resp.content)
+            for entry in feed.entries[:30]:
+                title   = entry.get("title", "")
+                summary = entry.get("summary", "") or entry.get("description", "")
+                combined = f"{title} {summary}"
+                tl = combined.lower()
+
+                if ("fii" not in tl and "fpi" not in tl) or "dii" not in tl:
+                    continue
+                if "crore" not in tl and " cr" not in tl:
+                    continue
+
+                dt_e = parse_dt(entry)
+                if not is_recent(dt_e, days=2):
+                    continue
+
+                fii_v, dii_v = _extract_fii_dii_from_text(combined)
                 if fii_v is not None:
-                    fp = "+" if fii_v>=0 else ""; dp = "+" if (dii_v or 0)>=0 else ""
-                    result.update({
-                        "fii_net":fii_v,"dii_net":dii_v,"data_date":date_v,
-                        "dt":datetime.now(timezone.utc),"source":"NSE (nselib)",
-                        "headline":f"FII: {fp}{fii_v:,.2f} Cr  |  DII: {dp}{(dii_v or 0):,.2f} Cr  (as of {date_v})"
-                    })
-                    return result
-        except: pass
+                    date_v = to_ist(dt_e).strftime("%d %b %Y")
+                    return {
+                        "fii_net": fii_v, "dii_net": dii_v,
+                        "data_date": date_v,
+                        "dt": dt_e,
+                        "source": src_name,
+                        "headline": title[:200],
+                    }
+        except Exception:
+            continue
 
-    # ── FALLBACK 1: Direct NSE JSON API with session ──────────
-    try:
-        session = requests.Session()
-        bh = {
-            "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language":"en-US,en;q=0.9",
-        }
-        session.get("https://www.nseindia.com",
-                    headers={**bh,"Accept":"text/html,*/*;q=0.9"},
-                    timeout=10, verify=False)
-        resp = session.get(
-            "https://www.nseindia.com/api/fiidiiTradeReact",
-            headers={**bh,"Accept":"application/json","Referer":"https://www.nseindia.com/reports/fii-dii"},
-            timeout=12, verify=False, proxies=PROXIES or {}
-        )
-        data = resp.json()
-        if isinstance(data, list) and data:
-            row = data[0]
-            date_v = str(row.get("date") or row.get("Date") or row.get("TRADE_DATE",""))[:12]
-            def _v(keys):
-                for k in keys:
-                    v = row.get(k)
-                    if v is None and "cashMarket" in row:
-                        v = row["cashMarket"].get(k)
-                    if v is not None:
-                        try: return float(str(v).replace(",",""))
-                        except: pass
-                return None
-            fii_v = _v(["fiiNetTrade","FII_NET_TRADE","fii_net_trade","FII"])
-            dii_v = _v(["diiNetTrade","DII_NET_TRADE","dii_net_trade","DII"])
-            if fii_v is not None:
-                fp = "+" if fii_v>=0 else ""; dp = "+" if (dii_v or 0)>=0 else ""
-                result.update({
-                    "fii_net":fii_v,"dii_net":dii_v,"data_date":date_v,
-                    "dt":datetime.now(timezone.utc),"source":"NSE API",
-                    "headline":f"FII: {fp}{fii_v:,.2f} Cr  |  DII: {dp}{(dii_v or 0):,.2f} Cr  (as of {date_v})"
-                })
-                return result
-    except: pass
-
-    # ── FALLBACK 2: Google News ────────────────────────────────
-    try:
-        for q in ["FII DII net NSE India provisional crore today",
-                  "FII buying selling India crore today NSE"]:
+    # ── LAYER 5: Google News with regex extraction ──
+    gn_queries = [
+        "FII DII net buy sell crore NSE India today provisional",
+        "FII DII data NSE India crore today cash market",
+        "foreign institutional investors DII crore India today",
+    ]
+    for q in gn_queries:
+        try:
             feed = feedparser.parse(gn(q))
-            for e in feed.entries[:8]:
-                t = e.get("title","").strip(); dt = parse_dt(e)
-                tl = t.lower()
-                if ("fii" in tl or "fpi" in tl) and "dii" in tl and is_recent(dt, days=1):
-                    nums = re.findall(r"[\-\+]?[\d,]+(?:\.\d+)?", t)
-                    valid = []
-                    for n in nums[:6]:
-                        try: valid.append(float(n.replace(",","")))
-                        except: pass
-                    result.update({
-                        "headline":t,"dt":dt,"source":"Google News",
-                        "data_date":to_ist(dt).strftime("%d %b %Y"),
-                        "fii_net":valid[0] if len(valid)>0 else None,
-                        "dii_net":valid[1] if len(valid)>1 else None,
-                    })
-                    return result
-    except: pass
+            for entry in feed.entries[:15]:
+                title   = entry.get("title", "").strip()
+                summary = entry.get("summary", "") or ""
+                combined = f"{title} {summary}"
+                tl = combined.lower()
 
-    return result
+                if ("fii" not in tl and "fpi" not in tl):
+                    continue
+
+                dt_e = parse_dt(entry)
+                if not is_recent(dt_e, days=2):
+                    continue
+
+                fii_v, dii_v = _extract_fii_dii_from_text(combined)
+                date_v = to_ist(dt_e).strftime("%d %b %Y")
+
+                if fii_v is not None:
+                    return {
+                        "fii_net": fii_v, "dii_net": dii_v,
+                        "data_date": date_v,
+                        "dt": dt_e,
+                        "source": "Google News (extracted)",
+                        "headline": title[:200],
+                    }
+
+                # Even if no number extracted, return headline so bar isn't blank
+                if "fii" in tl and is_recent(dt_e, days=1):
+                    return {
+                        "fii_net": None, "dii_net": None,
+                        "data_date": date_v,
+                        "dt": dt_e,
+                        "source": "Google News (headline only)",
+                        "headline": title[:200],
+                    }
+        except Exception:
+            continue
+
+    return empty
+
 
 # ─────────────────────────────────────────────────────────────
 # FEED SOURCES — news tabs
@@ -577,8 +801,6 @@ FEED_SOURCES = {
     ],
 }
 
-# Live Wire — Al Jazeera + Google News India/geopolitical
-# Investing.com REMOVED (only international news, not relevant)
 LIVEWIRE_FEEDS = [
     "https://www.aljazeera.com/xml/rss/all.xml",
     "https://www.aljazeera.com/xml/rss/middleeast.xml",
@@ -588,11 +810,10 @@ LIVEWIRE_FEEDS = [
 ]
 
 # ─────────────────────────────────────────────────────────────
-# RBI CIRCULARS — RSS only (clean and reliable)
+# RBI CIRCULARS — RSS only
 # ─────────────────────────────────────────────────────────────
 
 def fetch_rbi_circulars():
-    """RBI official RSS feeds only. No ASPX scraping, no Google News."""
     all_items, seen = [], set()
     for url in ["https://rbi.org.in/notifications_rss.xml",
                 "https://rbi.org.in/pressreleases_rss.xml"]:
@@ -615,27 +836,18 @@ def fetch_rbi_circulars():
 # ─────────────────────────────────────────────────────────────
 
 def fetch_nse_circulars():
-    """
-    Primary: nselib capital_market.exchange_circulars(period='1M')
-    Returns a DataFrame with circular details directly from NSE API.
-    Fallback: NSE RSS archives.
-    """
     all_items, seen = [], set()
-
-    # ── PRIMARY: nselib ──────────────────────────────────────
     if NSELIB_OK:
         try:
             from nselib import capital_market
             df = capital_market.exchange_circulars(period="1M")
             if df is not None and not df.empty:
                 for _, row in df.iterrows():
-                    # Try to get title/subject from common column names
                     t = str(row.get("subject") or row.get("Subject") or
                             row.get("circularSubject") or row.get("heading") or
                             row.get("title") or row.get("Title") or "").strip()
                     l = str(row.get("link") or row.get("Link") or
                             row.get("url") or row.get("circularUrl") or "#").strip()
-                    # Parse date
                     date_raw = str(row.get("date") or row.get("Date") or
                                    row.get("circularDate") or "").strip()
                     try:
@@ -651,7 +863,6 @@ def fetch_nse_circulars():
                                        "source":"NSE (nselib)"})
         except: pass
 
-    # ── FALLBACK: NSE RSS archives ────────────────────────────
     for url in ["https://nsearchives.nseindia.com/content/RSS/Circulars.xml",
                 "https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml"]:
         try:
@@ -733,11 +944,6 @@ def fetch_all_feeds(fd):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_livewire():
-    """
-    Al Jazeera + targeted Google News for India/geopolitical breaking news.
-    Investing.com removed — was only showing international commodity/FX news.
-    Refreshes every 60s.
-    """
     all_items, seen = [], set()
     for url in LIVEWIRE_FEEDS:
         try:
@@ -874,7 +1080,6 @@ html,body,.stApp,[data-testid="stAppViewContainer"] { background-color:#f0f2f5 !
 [data-stale="true"],[data-stale="false"] { opacity:1 !important; }
 .stApp,.stApp *,[data-testid="stAppViewContainer"],
 [data-testid="stAppViewContainer"] * { transition:none !important; animation-duration:0.001s !important; }
-/* Exception: live dot keeps its own animation */
 .live-dot { animation:pulse 4s infinite !important; }
 
 /* SIDEBAR */
@@ -893,7 +1098,6 @@ section[data-testid="stSidebar"] .stButton > button:hover { background:#4a5568 !
 section[data-testid="stSidebar"] .news-card  { background:#ffffff !important; }
 section[data-testid="stSidebar"] .card-title { color:#1565c0 !important; }
 section[data-testid="stSidebar"] .card-meta  { color:#4a5568 !important; }
-/* File uploader — styled dark, visible and functional */
 section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
     background:#2d3748 !important; border:1px dashed #4a5568 !important; border-radius:6px !important;
 }
@@ -1056,7 +1260,6 @@ for item in manual_items:
         try:    item["dt"] = datetime.fromisoformat(item["dt"])
         except: item["dt"] = datetime.now(timezone.utc)
 
-# Build all_articles — FEED_SOURCES + Live Wire + manual, sorted newest first
 all_articles = []
 for cat, arts in all_data.items():
     for a in arts: all_articles.append({**a,"category":cat,"manual":False})
@@ -1097,22 +1300,43 @@ if vix_price and vix_price >= 20:
     level = "🔴 EXTREME FEAR" if vix_price >= 25 else "🟡 ELEVATED FEAR"
     st.markdown(f'<div class="vix-banner">⚠️ INDIA VIX = {vix_price:.2f} — {level} · Elevated market risk — review positions immediately</div>', unsafe_allow_html=True)
 
-# FII/DII Flow Bar
+# ─────────────────────────────────────────────────────────────
+# FII/DII BAR — now shows source layer + data date
+# ─────────────────────────────────────────────────────────────
+
 fii_html = '<div class="fii-bar"><span>📊 FII/DII Provisional'
-dd = fii_data.get("data_date"); src = fii_data.get("source","")
-if dd:  fii_html += f' &nbsp;·&nbsp; <span style="color:#ffd54f !important;font-weight:700;">As of {dd}</span>'
-if src: fii_html += f' &nbsp;·&nbsp; <span style="color:#90caf9 !important;font-size:8.5pt !important;">{src}</span>'
+dd  = fii_data.get("data_date")
+src = fii_data.get("source", "")
+fn  = fii_data.get("fii_net")
+dn  = fii_data.get("dii_net")
+hl  = fii_data.get("headline", "")
+
+if dd:
+    fii_html += f' &nbsp;·&nbsp; <span style="color:#ffd54f !important;font-weight:700;">As of {dd}</span>'
+if src:
+    fii_html += f' &nbsp;·&nbsp; <span style="color:#90caf9 !important;font-size:8.5pt !important;">via {src}</span>'
 fii_html += ':</span>'
-fn = fii_data.get("fii_net"); dn = fii_data.get("dii_net")
+
 if fn is not None:
-    fc="fii-pos" if fn>=0 else "fii-neg"; dc="fii-pos" if (dn or 0)>=0 else "fii-neg"
+    fc = "fii-pos" if fn >= 0 else "fii-neg"
+    dc = "fii-pos" if (dn or 0) >= 0 else "fii-neg"
     fii_html += f'<span>FII: <span class="{fc}">{"+" if fn>=0 else ""}&#8377;{fn:,.0f} Cr</span></span>'
     if dn is not None:
         fii_html += f'<span>DII: <span class="{dc}">{"+" if dn>=0 else ""}&#8377;{dn:,.0f} Cr</span></span>'
-    if fn<0 and (dn or 0)<0:   fii_html += '<span style="color:#ff8a80 !important;font-weight:700;">⚠ Both Selling</span>'
-    elif fn>=0 and (dn or 0)>=0: fii_html += '<span style="color:#80e27e !important;font-weight:700;">✓ Both Buying</span>'
+    if fn < 0 and (dn or 0) < 0:
+        fii_html += '<span style="color:#ff8a80 !important;font-weight:700;">⚠ Both Selling</span>'
+    elif fn >= 0 and (dn or 0) >= 0:
+        fii_html += '<span style="color:#80e27e !important;font-weight:700;">✓ Both Buying</span>'
+elif hl:
+    # Headline only (no numbers extracted) — show the news title
+    fii_html += f'<span class="fii-neu" style="font-style:italic;">{hl[:120]}</span>'
+    fii_html += f'&nbsp;<a href="https://www.nseindia.com/reports/fii-dii" target="_blank" style="color:#90caf9 !important;font-size:8.5pt !important;">NSE ↗</a>'
 else:
-    fii_html += '<span class="fii-neu">Provisional data available after 5 PM IST &nbsp;|&nbsp; <a href="https://www.nseindia.com/reports/fii-dii" target="_blank" style="color:#90caf9 !important;">NSE Page ↗</a></span>'
+    fii_html += (
+        '<span class="fii-neu">Provisional data available after 5 PM IST &nbsp;|&nbsp; '
+        '<a href="https://www.nseindia.com/reports/fii-dii" target="_blank" '
+        'style="color:#90caf9 !important;">NSE Page ↗</a></span>'
+    )
 fii_html += '</div>'
 st.markdown(fii_html, unsafe_allow_html=True)
 
@@ -1285,8 +1509,6 @@ with st.sidebar:
 
 # ─────────────────────────────────────────────────────────────
 # RENDERERS
-# Each renderer uses LOCAL dedup only — no cross-tab interference.
-# This is the correct fix for blank category tabs.
 # ─────────────────────────────────────────────────────────────
 
 def _cls(ip,sent):
@@ -1296,7 +1518,6 @@ def _cls(ip,sent):
     return "news-card"
 
 def _local_dedup(articles):
-    """Deduplicate within a single list. Never touches a global set."""
     seen, out = set(), []
     for a in articles:
         t = a.get("title","")
@@ -1393,7 +1614,7 @@ def render_livewire(articles):
         pb='<span class="bp">⚡ PRIORITY</span>' if ip else ""
         src='<span class="baj">📡 AL JAZEERA</span>' if is_aj else '<span class="blw">🌐 LIVE</span>'
         sb=('<span class="bpo">▲ POSITIVE</span>' if sent=="positive" else '<span class="bne">▼ NEGATIVE</span>' if sent=="negative" else "")
-        st.markdown(f'<div class="{cls}"><a class="card-title" href="{link}" target="_blank">{art["title"]}</a><div class="card-meta"><span>{ago}</span>{src}{sb}{pb}</div></div>',unsafe_allow_html=True)
+        st.markdown(f'<div class="{cls}"><a class="card-title" href="{art["link"]}" target="_blank">{art["title"]}</a><div class="card-meta"><span>{ago}</span>{src}{sb}{pb}</div></div>',unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────
 # TABS
@@ -1432,7 +1653,6 @@ with tab_lw:
     st.markdown(f"<div style='font-size:9.5pt;color:#6a1b9a;margin-bottom:8px;'>🌐 Live Wire &nbsp;·&nbsp; Al Jazeera + Google News India/Geopolitical &nbsp;·&nbsp; Last 48h &nbsp;·&nbsp; {lw_count} articles</div>",unsafe_allow_html=True)
     render_livewire(livewire_articles)
 
-# Category tabs — each uses local dedup, completely independent
 for tab,cat in zip(cat_tabs,news_cats):
     with tab:
         st.markdown(f'<div class="cat-header">{cat}</div>',unsafe_allow_html=True)
