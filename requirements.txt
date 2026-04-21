@@ -9,3 +9,4 @@ pytz
 pandas
 openpyxl
 fpdf2
+nselib
