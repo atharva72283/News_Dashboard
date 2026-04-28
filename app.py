@@ -121,7 +121,8 @@ def is_priority(title):
 # MISTRAL AI
 # ─────────────────────────────────────────────────────────────
 
-MISTRAL_API_KEY = "0UhZEDyQ89ngflR8uYaE399ImRSUvOtX"
+# os.getenv looks for a secret named 'MY_API_KEY' in GitHub Actions
+MISTRAL_API_KEY = os.getenv("MY_API_KEY")
 MISTRAL_MODEL   = "mistral-small-latest"
 
 def _mistral_call(messages, max_tokens=400, temperature=0.1):
